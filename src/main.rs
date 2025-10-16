@@ -8,12 +8,7 @@ use core::cell::RefCell;
 use cortex_m::interrupt::{Mutex, free};
 use cortex_m_rt::entry;
 
-use stm32l4xx_hal::{
-    delay::Delay,
-    i2c::{Config, I2c},
-    pac,
-    prelude::*,
-};
+use stm32l4xx_hal::{delay::Delay, hal::spi::MODE_0, pac, prelude::*, spi::Spi};
 
 use rtt_target::{rprintln, rtt_init_print};
 
@@ -38,14 +33,15 @@ fn main() -> ! {
     let clocks = rcc.cfgr.freeze(&mut flash.acr, &mut pwr);
 
     let mut ahb2 = rcc.ahb2;
+    let mut apb2 = rcc.apb2;
     let mut gpioa = dp.GPIOA.split(&mut ahb2);
     let mut gpiob = dp.GPIOB.split(&mut ahb2);
     let mut gpioc = dp.GPIOC.split(&mut ahb2);
 
     // Configure PA5 as push-pull output (needs moder + otyper blocks)
-    let mut led = gpioa
-        .pa5
-        .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
+    // let mut led = gpioa
+    //     .pa5
+    //     .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
     let mut led1 = gpiob
         .pb6
         .into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper);
@@ -58,46 +54,62 @@ fn main() -> ! {
 
     rprintln!("Creating Sensor Interface");
 
-    let _communication_select_a =
-        gpioa.pa8.into_push_pull_output_in_state(&mut gpioa.moder, &mut gpioa.otyper, PinState::High);
-    let _communication_select_b =
-        gpioa.pa10.into_push_pull_output_in_state(&mut gpioa.moder, &mut gpioa.otyper, PinState::High);
-    // TODO PCB: pb10
-    let scl =
-        gpiob
-            .pb8
-            .into_alternate_open_drain(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrh);
-    // scl.internal_pull_up(&mut gpiob.pupdr, true);
-    // TODO PCB: pb11
-    let sda =
-        gpiob
-            .pb9
-            .into_alternate_open_drain(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrh);
-    // sda.internal_pull_up(&mut gpiob.pupdr, true);
+    // TODO PCB:
+    let sck =
+        gpioa
+            .pa5
+            .into_alternate_push_pull(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl);
+    // TODO PCB:
+    let mosi =
+        gpioa
+            .pa7
+            .into_alternate_push_pull(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl);
+    let miso = gpioa
+        .pa6
+        .into_alternate(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl);
 
-    let config = Config::new(100_u32.kHz(), clocks.clone());
-    // TODO PCB: I2C2
-    let i2c_interface = I2c::i2c1(dp.I2C1, (scl, sda), config, &mut rcc.apb1r1);
-    let ms5849_i2c = MS5849::new(i2c_interface, &delay);
+    let mut cs = gpioa
+        .pa8
+        .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper); // CS pin
+    cs.set_high(); // idle high
+    let spi = Spi::spi1(
+        dp.SPI1,
+        (sck, miso, mosi),
+        MODE_0,
+        1.MHz(),
+        clocks,
+        &mut apb2,
+    );
+
+    let mut ms5849_spi = MS5849::new_spi(spi, cs, &delay);
 
     rprintln!("Starting main loop");
 
     loop {
-        led.toggle();
+        // led.toggle();
         led1.toggle();
         led2.set_high();
         free(|cs| delay.borrow(cs).borrow_mut().delay_ms(300u16));
         led2.set_low();
         free(|cs| delay.borrow(cs).borrow_mut().delay_ms(200u16));
 
-        let pressure = ms5849_i2c.measure_pressure_to_bar();
-        match ms5849_i2c.depth() {
-            Ok(Some(depth)) => rprintln!("Measuring Pressure: {:?}, depth: {:?}", pressure, depth),
-            Ok(None) => rprintln!("No pressure or depth."),
-            Err(e) => rprintln!(
-                "Got error while reading depth for pressure {:?}: {:?}.",
+        ms5849_spi.read_spi();
+        let pressure = ms5849_spi.measure_pressure_to_bar();
+        match (ms5849_spi.depth(), ms5849_spi.altitude()) {
+            (Ok(Some(depth)), _) => {
+                rprintln!("Measuring Pressure: {:?}, depth: {:?}", pressure, depth)
+            }
+            (Err(_), Ok(Some(altitude))) => rprintln!(
+                "Measuring Pressure: {:?}, altitude: {:?}",
                 pressure,
-                e
+                altitude
+            ),
+            (Ok(None), _) | (_, Ok(None)) => rprintln!("No pressure or depth."),
+            (Err(e), Err(e2)) => rprintln!(
+                "Got error while reading depth for pressure {:?}: {:?}, altitude: {:?}.",
+                pressure,
+                e,
+                e2
             ),
         };
     }

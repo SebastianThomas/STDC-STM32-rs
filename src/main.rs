@@ -3,7 +3,7 @@
 
 use panic_probe as _;
 
-use core::cell::RefCell;
+use core::{cell::RefCell, time::Duration};
 
 use cortex_m::interrupt::{Mutex, free};
 use cortex_m_rt::entry;
@@ -12,7 +12,14 @@ use stm32l4xx_hal::{delay::Delay, hal::spi::MODE_0, pac, prelude::*, spi::Spi};
 
 use rtt_target::{rprintln, rtt_init_print};
 
-use stdc_stm32_rs::MS5849;
+use stdc_stm32_rs::{MS5849, display::DisplayState};
+
+use thalmann::{
+    display_utils::{format_f32, show_duration},
+    pressure_unit::{self, Pressure},
+};
+
+static mut DISPLAY_STATE: Mutex<DisplayState> = Mutex::new(DisplayState::default());
 
 #[entry]
 fn main() -> ! {
@@ -112,5 +119,12 @@ fn main() -> ! {
                 e2
             ),
         };
+
+        refresh_display();
     }
+}
+
+fn refresh_display() {
+    let _duration_chars = show_duration(DISPLAY_STATE.dive_time);
+    let _meters_chars = format_f32::<' ', 3, 1>(DISPLAY_STATE.depth.to_f32());
 }

@@ -1,7 +1,7 @@
 pub mod barometric {
-    use crate::pressure_unit::*;
+    use thalmann::pressure_unit::{Bar, Pa, Pressure, hPa, kPa};
 
-    pub const SURFACE_PA: Pa = Pa(101325.0);
+    pub const SURFACE_PA: Pa = Pa::new(101325.0);
     pub const SURFACE_HPA: hPa = SURFACE_PA.to_hpa();
     pub const SURFACE_KPA: kPa = SURFACE_PA.to_kpa();
     pub const SURFACE_BAR: Bar = SURFACE_PA.to_bar();
@@ -19,6 +19,8 @@ pub mod ms5849_pressure {
     use rtt_target::rprintln;
     use stm32l4xx_hal::hal::blocking::spi;
 
+    use thalmann::pressure_unit::{Bar, Pa, Pressure};
+
     use crate::spi::{spi_read_register, spi_write_delay};
 
     use libm::powf;
@@ -32,7 +34,6 @@ pub mod ms5849_pressure {
     };
 
     use crate::ms5849::barometric::*;
-    use crate::pressure_unit::*;
 
     pub const MS5849_ADDR: u8 = 0x76;
     // pub const MS5849_RESET: u8 = 0x1E;
@@ -352,7 +353,7 @@ pub mod ms5849_pressure {
         }
 
         pub fn pressure(&self) -> Option<Pa> {
-            return self.P.map(|p| Pa(p as f32 * 10.0));
+            return self.P.map(|p| Pa::new(p as f32 * 10.0));
         }
 
         pub fn temperature(&self) -> Option<f32> {
@@ -376,7 +377,7 @@ pub mod ms5849_pressure {
             }
             let fluid_density_10_m: f32 = (self.fluid_density as f32) * 9.80665;
             return Ok(Some(
-                (pressure_below / fluid_density_10_m).to_bar().0 * 10.0,
+                (pressure_below / fluid_density_10_m).to_bar().to_f32() * 10.0,
             ));
         }
 
@@ -385,7 +386,7 @@ pub mod ms5849_pressure {
                 Some(p) => p,
                 None => return Ok(None),
             };
-            let p: f32 = pressure.to_pa().0 / SURFACE_PA.to_pa().0;
+            let p: f32 = pressure.to_pa() / SURFACE_PA.to_pa();
             let pow: f32 = 0.190284;
             let ratio = 1.0 - powf(p, pow);
             return Ok(Some(ratio * ALT_PER_FOOT * FEET_TO_METERS));

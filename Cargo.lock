@@ -364,8 +364,8 @@ dependencies = [
 
 [[package]]
 name = "thalmann"
-version = "0.1.8"
-source = "git+https://github.com/SebastianThomas/STDC-thalmann.git#049e455ca1b9a73f75414e306d685ad369888078"
+version = "0.1.9"
+source = "git+https://github.com/SebastianThomas/STDC-thalmann.git#26a046040551df490534646ef9c63b4b531802c5"
 dependencies = [
  "num",
 ]
@@ -378,9 +378,9 @@ checksum = "e87a2ed6b42ec5e28cc3b94c09982969e9227600b2e3dcbc1db927a84c06bd69"
 
 [[package]]
 name = "unicode-ident"
-version = "1.0.19"
+version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f63a545481291138910575129486daeaf8ac54aee4387fe7906919f7830c7d9d"
+checksum = "462eeb75aeb73aea900253ce739c8e18a67423fadf006037cd3ff27e82748a06"
 
 [[package]]
 name = "vcell"

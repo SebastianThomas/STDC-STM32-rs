@@ -19,8 +19,18 @@ pub struct DisplayState {
 pub const ZERO_LOADING_AIR: TissuesLoading<{ mptt::NUM_TISSUES }, Pa> =
     TissuesLoading::new(msw(0.0).to_pa(), &AIR);
 
+impl const Default for DisplayState {
+    fn default() -> Self {
+        DisplayState {
+            depth: msw(0.0),
+            dive_time: Duration::from_millis(0),
+            stop_schedule: Ok(StopSchedule::default()),
+        }
+    }
+}
+
 impl DisplayState {
-    fn new<const NUM_GASES: usize>(gases: &[GasMix<f32>; NUM_GASES]) -> Self {
+    pub fn new<const NUM_GASES: usize>(gases: &[GasMix<f32>; NUM_GASES]) -> Self {
         DisplayState {
             depth: msw(0.0),
             dive_time: Duration::from_millis(0),

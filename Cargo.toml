@@ -12,6 +12,6 @@ rtt-target = { version="0.3.1",  features = ["cortex-m"] }
 panic-halt = "0.2.0"
 panic-probe = "0.3"
 libm = "0.2.15"
-thalmann = { git = "https://github.com/SebastianThomas/STDC-thalmann.git", version="0.1.8", features = ["thalmann"] }
+thalmann = { git = "https://github.com/SebastianThomas/STDC-thalmann.git", version="0.1.9", features = ["thalmann"] }
 num = { version = "0.4.3", default-features = false, features = ["libm"] }
 

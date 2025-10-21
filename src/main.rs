@@ -1,9 +1,12 @@
 #![no_main]
 #![no_std]
 
+#![feature(const_trait_impl)]
+#![feature(const_default)]
+
 use panic_probe as _;
 
-use core::{cell::RefCell, time::Duration};
+use core::cell::{Ref, RefCell};
 
 use cortex_m::interrupt::{Mutex, free};
 use cortex_m_rt::entry;
@@ -16,10 +19,11 @@ use stdc_stm32_rs::{MS5849, display::DisplayState};
 
 use thalmann::{
     display_utils::{format_f32, show_duration},
-    pressure_unit::{self, Pressure},
+    pressure_unit::Pressure,
 };
 
-static mut DISPLAY_STATE: Mutex<DisplayState> = Mutex::new(DisplayState::default());
+static DISPLAY_STATE: Mutex<RefCell<DisplayState>> =
+    Mutex::new(RefCell::new(DisplayState::default()));
 
 #[entry]
 fn main() -> ! {
@@ -120,11 +124,14 @@ fn main() -> ! {
             ),
         };
 
-        DISPLAY_STATE.borrow(|state| refresh_display(state));
+        free(|cs| {
+            let display_state = DISPLAY_STATE.borrow(cs).borrow();
+            refresh_display(display_state);
+        });
     }
 }
 
-fn refresh_display(display_state: &DisplayState) {
-    let _duration_chars = show_duration(display_state.borrow().dive_time);
-    let _meters_chars = format_f32::<' ', 3, 1>(display_state.borrow().depth.to_f32());
+fn refresh_display(display_state: Ref<DisplayState>) {
+    let _duration_chars = show_duration(display_state.dive_time);
+    let _meters_chars = format_f32::<' ', 3, 1>(display_state.depth.to_f32());
 }

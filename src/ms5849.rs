@@ -366,7 +366,7 @@ pub mod ms5849_pressure {
         // If the atmospheric pressure is not 101300 at the time of reading, the depth reported will be offset
         // In order to calculate the correct depth, the actual atmospheric pressure should be measured once in air, and
         // that value should subtracted for subsequent depth calculations.
-        pub fn depth(&self) -> Result<Option<f32>, &str> {
+        pub fn depth(&self) -> Result<Option<Bar>, &str> {
             let pressure = match self.pressure() {
                 Some(p) => p,
                 None => return Ok(None),
@@ -376,9 +376,7 @@ pub mod ms5849_pressure {
                 return Err("Use altitude instead.");
             }
             let fluid_density_10_m: f32 = (self.fluid_density as f32) * 9.80665;
-            return Ok(Some(
-                (pressure_below / fluid_density_10_m).to_bar().to_f32() * 10.0,
-            ));
+            return Ok(Some((pressure_below / fluid_density_10_m).to_bar()));
         }
 
         pub fn altitude(&self) -> Result<Option<f32>, &str> {

@@ -1,6 +1,7 @@
 #![no_std]
 #![feature(const_trait_impl)]
 #![feature(const_ops)]
+#![feature(const_default)]
 
 pub mod ms5849;
 pub mod spi;

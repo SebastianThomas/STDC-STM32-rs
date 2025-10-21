@@ -3,7 +3,7 @@ use core::time::Duration;
 use thalmann::{
     DINC, calc_deco_schedule,
     dive::StopSchedule,
-    gas::{AIR, TissuesLoading},
+    gas::{AIR, GasMix, TissuesLoading},
     mptt,
     pressure_unit::{Pa, Pressure, msw},
 };
@@ -16,15 +16,15 @@ pub struct DisplayState {
     pub stop_schedule: Result<StopSchedule<MAX_STOP_NUMS>, &'static str>,
 }
 
-pub const ZERO_LOADING: TissuesLoading<{ mptt::NUM_TISSUES }, Pa> =
-    TissuesLoading::new(msw(0.0).to_pa(), AIR);
+pub const ZERO_LOADING_AIR: TissuesLoading<{ mptt::NUM_TISSUES }, Pa> =
+    TissuesLoading::new(msw(0.0).to_pa(), &AIR);
 
-impl Default for DisplayState {
-    fn default() -> Self {
+impl DisplayState {
+    fn new<const NUM_GASES: usize>(gases: &[GasMix<f32>; NUM_GASES]) -> Self {
         DisplayState {
             depth: msw(0.0),
             dive_time: Duration::from_millis(0),
-            stop_schedule: calc_deco_schedule::<MAX_STOP_NUMS>(&ZERO_LOADING, &AIR),
+            stop_schedule: calc_deco_schedule::<MAX_STOP_NUMS, NUM_GASES>(&ZERO_LOADING_AIR, gases),
         }
     }
 }

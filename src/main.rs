@@ -120,11 +120,11 @@ fn main() -> ! {
             ),
         };
 
-        refresh_display();
+        DISPLAY_STATE.borrow(|state| refresh_display(state));
     }
 }
 
-fn refresh_display() {
-    let _duration_chars = show_duration(DISPLAY_STATE.dive_time);
-    let _meters_chars = format_f32::<' ', 3, 1>(DISPLAY_STATE.depth.to_f32());
+fn refresh_display(display_state: &DisplayState) {
+    let _duration_chars = show_duration(display_state.borrow().dive_time);
+    let _meters_chars = format_f32::<' ', 3, 1>(display_state.borrow().depth.to_f32());
 }

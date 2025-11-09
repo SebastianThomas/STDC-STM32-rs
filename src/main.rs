@@ -31,13 +31,13 @@ use thalmann::{
     dive::{DiveMeasurement, DiveProfile, StopSchedule},
     loadings_from_dive_profile,
     mptt::{TISSUES, XVAL_HE9_040_F32},
-    pressure_unit::{Bar, Pressure},
+    pressure_unit::Pressure,
 };
 
 use stdc_stm32_rs::{
     MS5849,
-    display::{DisplayState, MAX_STOP_NUMS, ZERO_LOADING_AIR},
-    ms5849::barometric::SURFACE_PA,
+    barometric::{DepthOrAltitude, SURFACE_PA},
+    display::{DisplayState, MAX_STOP_NUMS},
 };
 
 static DISPLAY_STATE: Mutex<RefCell<DisplayState>> =
@@ -49,6 +49,7 @@ fn main() -> ! {
 
     rprintln!("Booting..");
 
+    // 0001: Configure Peripherals, Clocks
     let cp = cortex_m::Peripherals::take().unwrap();
 
     let dp = pac::Peripherals::take().unwrap();
@@ -57,6 +58,12 @@ fn main() -> ! {
     let mut rcc = dp.RCC.constrain();
     let mut flash = dp.FLASH.constrain();
     let mut pwr = dp.PWR.constrain(&mut rcc.apb1r1);
+
+    let mut ahb2 = rcc.ahb2;
+    let mut apb2 = rcc.apb2;
+    let mut gpioa = dp.GPIOA.split(&mut ahb2);
+    let mut gpiob = dp.GPIOB.split(&mut ahb2);
+    let mut gpioc = dp.GPIOC.split(&mut ahb2);
 
     // TODO: Configure clock to 24 MHz if required with .sysclk(24.MHz())
     let clocks = rcc.cfgr.freeze(&mut flash.acr, &mut pwr);
@@ -90,16 +97,7 @@ fn main() -> ! {
     let (_boot_date, _boot_time) = rtc.get_date_time();
     let _boot_ms: u32 = millis_tim2();
 
-    let mut ahb2 = rcc.ahb2;
-    let mut apb2 = rcc.apb2;
-    let mut gpioa = dp.GPIOA.split(&mut ahb2);
-    let mut gpiob = dp.GPIOB.split(&mut ahb2);
-    let mut gpioc = dp.GPIOC.split(&mut ahb2);
-
-    // Configure PA5 as push-pull output (needs moder + otyper blocks)
-    // let mut led = gpioa
-    //     .pa5
-    //     .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
+    // Custom SHIELD LEDs, TODO: remove
     let mut led1 = gpiob
         .pb6
         .into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper);
@@ -109,6 +107,16 @@ fn main() -> ! {
 
     // Delay using systick
     let delay: Mutex<RefCell<Delay>> = Mutex::new(RefCell::new(Delay::new(cp.SYST, clocks)));
+
+    // Example: Toggle LEDs
+    loop {
+        led1.toggle();
+        led2.set_high();
+        free(|cs| delay.borrow(cs).borrow_mut().delay_ms(300u16));
+        led2.set_low();
+        free(|cs| delay.borrow(cs).borrow_mut().delay_ms(200u16));
+        break;
+    }
 
     rprintln!("Creating Sensor Interface");
 
@@ -141,12 +149,11 @@ fn main() -> ! {
 
     let mut ms5849_spi = MS5849::new_spi(spi, cs, &delay);
 
-    rprintln!("Starting main loop");
-
+    rprintln!("Starting main waiting loop");
     loop {
         let pressure = ms5849_spi.measure_pressure_to_bar();
-        match (ms5849_spi.depth(), ms5849_spi.altitude()) {
-            (Ok(Some(depth)), _) => {
+        match ms5849_spi.depth_or_altitude() {
+            Ok(DepthOrAltitude::Depth { pressure, depth }) => {
                 rprintln!(
                     "Starting Dive: Pressure: {:?}, depth: {:?}",
                     pressure,
@@ -154,22 +161,17 @@ fn main() -> ! {
                 );
                 break;
             }
-            (Err(_), Ok(Some(altitude))) => rprintln!(
+            Ok(DepthOrAltitude::Altitude { pressure, altitude }) => rprintln!(
                 "Measuring Pressure: {:?}, altitude: {:?}",
                 pressure,
                 altitude
             ),
-            (Ok(None), _) | (_, Ok(None)) => rprintln!("No pressure or depth."),
-            (Err(e), Err(e2)) => rprintln!(
-                "Got error while reading depth for pressure {:?}: {:?}, altitude: {:?}.",
+            Err(err) => rprintln!(
+                "Got error while reading depth for pressure {:?}: {:?}.",
                 pressure,
-                e,
-                e2
+                err,
             ),
         };
-
-        // TODO: Remove once testing complete
-        break;
     }
 
     let dive_start_millis = millis_tim2();
@@ -195,39 +197,35 @@ fn main() -> ! {
         let duration_since_start =
             Duration::from_millis((current_millis - dive_start_millis) as u64);
         set_dive_time(duration_since_start);
-        // led.toggle();
-        led1.toggle();
-        led2.set_high();
-        free(|cs| delay.borrow(cs).borrow_mut().delay_ms(300u16));
-        led2.set_low();
-        free(|cs| delay.borrow(cs).borrow_mut().delay_ms(200u16));
 
+        let measurement_millis = millis_tim2();
         ms5849_spi.read_spi();
-        let pressure = ms5849_spi.measure_pressure_to_bar();
-        match (ms5849_spi.depth(), ms5849_spi.altitude()) {
-            (Ok(Some(depth)), _) => {
+        match ms5849_spi.depth_or_altitude() {
+            Ok(DepthOrAltitude::Depth { pressure, depth }) => {
                 rprintln!("Measuring Pressure: {:?}, depth: {:?}", pressure, depth);
                 set_depth(depth);
-                // TODO: Add Measurement to Dive Profile
                 let measurement = DiveMeasurement {
                     gas: current_gas_idx,
-                    depth: depth.to_pa(),
-                    time_ms: millis_tim2() as usize, // TODO: Time before measuring?
+                    depth: pressure,
+                    time_ms: measurement_millis as usize,
                 };
+                // TODO: Add Measurement to Dive Profile
                 // TODO: Update loading
             }
-            (Err(_), Ok(Some(altitude))) => rprintln!(
-                "Measuring Pressure: {:?}, altitude: {:?}",
-                pressure,
-                altitude
-            ),
-            (Ok(None), _) | (_, Ok(None)) => rprintln!("No pressure or depth."),
-            (Err(e), Err(e2)) => rprintln!(
-                "Got error while reading depth for pressure {:?}: {:?}, altitude: {:?}.",
-                pressure,
-                e,
-                e2
-            ),
+            Ok(DepthOrAltitude::Altitude { pressure, altitude }) => {
+                rprintln!(
+                    "Measuring Pressure: {:?}, altitude: {:?}",
+                    pressure,
+                    altitude
+                );
+            }
+            Err((pressure, err)) => {
+                rprintln!(
+                    "Got error while reading depth for pressure {:?}: {:?}.",
+                    pressure,
+                    err
+                );
+            }
         };
         let stops = calc_deco_schedule(&loading, &gases);
         match stops {
@@ -238,7 +236,7 @@ fn main() -> ! {
     }
 }
 
-fn set_depth(depth: Bar) {
+fn set_depth<P: Pressure>(depth: P) {
     free(|cs| {
         let mut display_state = DISPLAY_STATE.borrow(cs).borrow_mut();
         display_state.depth = depth.to_msw();

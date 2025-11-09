@@ -14,37 +14,34 @@ use cortex_m::interrupt::{Mutex, free};
 use cortex_m_rt::entry;
 
 use stm32l4xx_hal::{
-    delay::Delay, hal::spi::MODE_0, interrupt, pac, prelude::*, spi::Spi, timer::Timer,
+    delay::Delay,
+    hal::spi::MODE_0,
+    pac::{self, TIM2},
+    prelude::*,
+    rtc::{Rtc, RtcConfig},
+    spi::Spi,
+    timer::Timer,
 };
 
 use rtt_target::{rprintln, rtt_init_print};
 
 use thalmann::{
+    calc_deco_schedule,
     display_utils::{format_f32, show_duration},
     dive::{DiveMeasurement, DiveProfile, StopSchedule},
-    gas::GasMix,
-    pressure_unit::{Bar, Pressure, msw},
+    loadings_from_dive_profile,
+    mptt::{TISSUES, XVAL_HE9_040_F32},
+    pressure_unit::{Bar, Pressure},
 };
 
 use stdc_stm32_rs::{
     MS5849,
-    display::{DisplayState, MAX_STOP_NUMS},
+    display::{DisplayState, MAX_STOP_NUMS, ZERO_LOADING_AIR},
+    ms5849::barometric::SURFACE_PA,
 };
 
-static TIM2_COUNTER: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
 static DISPLAY_STATE: Mutex<RefCell<DisplayState>> =
     Mutex::new(RefCell::new(DisplayState::default()));
-
-#[cortex_m_rt::interrupt]
-fn TIM2() {
-    free(|cs| {
-        let mut counter = TIM2_COUNTER.borrow(cs).borrow_mut();
-        *counter = counter.wrapping_add(1);
-    });
-
-    let dp = unsafe { pac::Peripherals::steal() };
-    dp.TIM2.sr.modify(|_, w| w.uif().clear_bit()); // clear update interrupt flag
-}
 
 #[entry]
 fn main() -> ! {
@@ -64,15 +61,40 @@ fn main() -> ! {
     // TODO: Configure clock to 24 MHz if required with .sysclk(24.MHz())
     let clocks = rcc.cfgr.freeze(&mut flash.acr, &mut pwr);
 
+    Timer::free_running_tim2(dp.TIM2, clocks, 1.kHz(), false, &mut rcc.apb1r1);
+
+    let rtc_config = RtcConfig::default(); // .clock_config(RtcClockSource::LSE);
+    let mut rtc: Rtc = Rtc::rtc(
+        dp.RTC,
+        &mut rcc.apb1r1,
+        &mut rcc.bdcr,
+        &mut pwr.cr1,
+        rtc_config,
+    );
+    // TODO:
+    rtc.set_date_time(
+        stm32l4xx_hal::datetime::Date {
+            day: 1,
+            date: 10,
+            month: 11,
+            year: 2025,
+        },
+        stm32l4xx_hal::datetime::Time {
+            hours: 0,
+            minutes: 0,
+            seconds: 0,
+            micros: 0,
+            daylight_savings: false,
+        },
+    );
+    let (_boot_date, _boot_time) = rtc.get_date_time();
+    let _boot_ms: u32 = millis_tim2();
+
     let mut ahb2 = rcc.ahb2;
     let mut apb2 = rcc.apb2;
     let mut gpioa = dp.GPIOA.split(&mut ahb2);
     let mut gpiob = dp.GPIOB.split(&mut ahb2);
     let mut gpioc = dp.GPIOC.split(&mut ahb2);
-
-    let mut timer = Timer::tim2(dp.TIM2, 1.kHz(), clocks, &mut rcc.apb1r1);
-    timer.listen(stm32l4xx_hal::timer::Event::TimeOut); // enable interrupt on update
-    unsafe { cortex_m::peripheral::NVIC::unmask(pac::Interrupt::TIM2) };
 
     // Configure PA5 as push-pull output (needs moder + otyper blocks)
     // let mut led = gpioa
@@ -119,9 +141,6 @@ fn main() -> ! {
 
     let mut ms5849_spi = MS5849::new_spi(spi, cs, &delay);
 
-    let gases: [GasMix<f32>; 1] = [thalmann::gas::AIR];
-
-    let start_time = millis();
     rprintln!("Starting main loop");
 
     loop {
@@ -153,20 +172,28 @@ fn main() -> ! {
         break;
     }
 
-    let mut dive_profile = DiveProfile {
+    let dive_start_millis = millis_tim2();
+
+    let gases = [thalmann::gas::AIR];
+    let surface = SURFACE_PA;
+    let dive_profile = DiveProfile {
         dive_id: 1,
-        max_depth: msw::new(0.0),
-        gases: gases,
+        max_depth: surface,
+        gases,
         measurements: [DiveMeasurement {
-            depth: msw::new(0.0).to_pa(),
-            time_ms: millis() as usize,
+            depth: surface.to_pa(),
+            time_ms: dive_start_millis as usize,
             gas: 0,
         }],
     };
+    let loading = loadings_from_dive_profile(&TISSUES, &dive_profile, &XVAL_HE9_040_F32, surface);
+
+    let current_gas_idx: usize = 0;
 
     loop {
-        let millis = millis();
-        let duration_since_start = Duration::from_millis((millis - start_time) as u64);
+        let current_millis = millis_tim2_since(dive_start_millis);
+        let duration_since_start =
+            Duration::from_millis((current_millis - dive_start_millis) as u64);
         set_dive_time(duration_since_start);
         // led.toggle();
         led1.toggle();
@@ -182,6 +209,12 @@ fn main() -> ! {
                 rprintln!("Measuring Pressure: {:?}, depth: {:?}", pressure, depth);
                 set_depth(depth);
                 // TODO: Add Measurement to Dive Profile
+                let measurement = DiveMeasurement {
+                    gas: current_gas_idx,
+                    depth: depth.to_pa(),
+                    time_ms: millis_tim2() as usize, // TODO: Time before measuring?
+                };
+                // TODO: Update loading
             }
             (Err(_), Ok(Some(altitude))) => rprintln!(
                 "Measuring Pressure: {:?}, altitude: {:?}",
@@ -196,11 +229,12 @@ fn main() -> ! {
                 e2
             ),
         };
-
-        free(|cs| {
-            let display_state = DISPLAY_STATE.borrow(cs).borrow();
-            refresh_display(display_state);
-        });
+        let stops = calc_deco_schedule(&loading, &gases);
+        match stops {
+            Ok(stops) => set_stop_schedule(stops),
+            Err(err) => rprintln!("Got error while calculating deco schedule: {:?}.", err),
+        }
+        refresh_display();
     }
 }
 
@@ -225,12 +259,22 @@ fn set_stop_schedule(stops: StopSchedule<MAX_STOP_NUMS>) {
     });
 }
 
-fn refresh_display(display_state: Ref<DisplayState>) {
+fn refresh_display() {
+    free(|cs| {
+        let display_state = DISPLAY_STATE.borrow(cs).borrow();
+        refresh_display_with_state(display_state);
+    });
+}
+
+fn refresh_display_with_state(display_state: Ref<DisplayState>) {
     let _duration_chars = show_duration(display_state.dive_time);
     let _meters_chars = format_f32::<' ', 3, 1>(display_state.depth.to_f32());
 }
 
-// Function to get current millis
-fn millis() -> u32 {
-    free(|cs| *TIM2_COUNTER.borrow(cs).borrow())
+fn millis_tim2() -> u32 {
+    Timer::<TIM2>::count()
+}
+
+fn millis_tim2_since(start: u32) -> u32 {
+    Timer::<TIM2>::count().wrapping_sub(start)
 }

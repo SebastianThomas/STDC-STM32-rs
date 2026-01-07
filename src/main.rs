@@ -12,6 +12,7 @@ use core::{
 
 use cortex_m::interrupt::{Mutex, free};
 use cortex_m_rt::entry;
+use rtt_target::{rprintln, rtt_init_print};
 
 use stm32l4xx_hal::{
     delay::Delay,
@@ -22,8 +23,6 @@ use stm32l4xx_hal::{
     spi::Spi,
     timer::Timer,
 };
-
-use rtt_target::{rprintln, rtt_init_print};
 
 use thalmann::{
     calc_deco_schedule,

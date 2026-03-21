@@ -34,9 +34,11 @@ use thalmann::{
 };
 
 use stdc_stm32_rs::{
-    MS5849,
     barometric::{DepthOrAltitude, SURFACE_PA},
-    display::{DisplayState, MAX_STOP_NUMS},
+    components::{
+        MS5849,
+        display::{DisplayState, MAX_STOP_NUMS},
+    },
 };
 
 static DISPLAY_STATE: Mutex<RefCell<DisplayState>> =

@@ -65,9 +65,10 @@ where
 
 impl<const GAS_NR: u8> LogDiveControlDataBlock<GAS_NR>
 where
-    [(); GAS_NR as usize * 3]:,
-    [(); 24 + GAS_NR as usize * 3]:,
+    [(); 3 + 24 + GAS_NR as usize * 3]:,
 {
+    // const LEN: usize = 24 + GAS_NR as usize * 3;
+
     pub fn new(
         start_epoch_seconds: u32,
         surface_interval_seconds: u32,
@@ -97,7 +98,10 @@ where
         }
     }
 
-    pub fn write<F: Flash>(&self, flash: &mut F) {
+    pub fn write<F: Flash>(&self, flash: &mut F) -> Result<u32, F::Error>
+    where
+        [(); 3 + (24 + GAS_NR as usize * 3)]:,
+    {
         let mut bytes: [u8; 24 + GAS_NR as usize * 3] = [0; 24 + GAS_NR as usize * 3];
         bytes[0] = (self.firmware_version >> 8 & 0xFF) as u8;
         bytes[1] = (self.firmware_version & 0xFF) as u8;
@@ -124,9 +128,9 @@ where
         bytes[22] = self.gf_high;
         bytes[23] = self.gas_nr;
 
-        bytes[24..24 + GAS_NR as usize * 3].copy_from_slice(&self.gas_content);
+        bytes[24..24 + GAS_NR as usize * 3 - 1].copy_from_slice(&self.gas_content);
 
-        flash.write(&bytes);
+        flash.write::<{ 24 + GAS_NR as usize * 3 }>(&bytes)
     }
 }
 
@@ -238,7 +242,7 @@ pub struct LogPointData {
 }
 
 impl LogPointData {
-    pub fn write<F: Flash>(&self, flash: &mut F) {
+    pub fn write<F: Flash>(&self, flash: &mut F) -> Result<(u32, Option<u32>), F::Error> {
         // Make sure metadata optional pages are always valid
         let metadata =
             self.basic_data.metadata.byte & if self.deco_data.is_some() { 0xF7 } else { 0xF7 };
@@ -253,7 +257,7 @@ impl LogPointData {
             self.basic_data.temperature as u8,
             self.basic_data.ascent_rate,
         ];
-        flash.write(&basic_page);
+        let basic_start_addr = flash.write(&basic_page)?;
         if self.basic_data.metadata.optional_param_pages()[3]
             && let Some(deco_page) = &self.deco_data
         {
@@ -267,7 +271,9 @@ impl LogPointData {
                 deco_page.po2,
                 deco_page.cns,
             ];
-            flash.write(&deco_page);
+            let deco_start_addr = flash.write(&deco_page)?;
+            return Ok((basic_start_addr, Some(deco_start_addr)));
         }
+        Ok((basic_start_addr, None))
     }
 }

@@ -395,6 +395,7 @@ dependencies = [
  "cortex-m-rt",
  "defmt 1.0.1",
  "libm",
+ "nb 1.1.0",
  "num",
  "panic-halt",
  "panic-probe",

@@ -1,4 +1,4 @@
-use crate::flash::Flash;
+use crate::components::flash::Flash;
 
 pub const FIRMWARE_VERSION: u16 = 0;
 pub const COMPUTER_SERIAL_NUMBER: u8 = 0;

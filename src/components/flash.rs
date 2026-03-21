@@ -5,7 +5,7 @@ use stm32l4xx_hal::hal::{
     digital::v2::OutputPin,
 };
 
-use crate::uart_log::ExternalLogger;
+use crate::components::uart_log::ExternalLogger;
 
 pub const PAGE_SIZE: u32 = 256;
 

@@ -5,11 +5,6 @@
 #![feature(generic_const_exprs)]
 
 pub mod barometric;
-pub mod display;
-pub mod dive_log;
-pub mod flash;
-pub mod ms5849;
+pub mod components;
 pub mod spi;
-pub mod uart_log;
 
-pub use ms5849::MS5849;

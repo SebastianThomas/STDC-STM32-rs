@@ -1,11 +1,10 @@
-use core::fmt::{Display, Formatter};
-
 use stm32l4xx_hal::hal::{
     blocking::spi::{Transfer, Write},
     digital::v2::OutputPin,
 };
 
-use crate::components::uart_log::ExternalLogger;
+use super::spi_utils::SpiError;
+use super::uart_log::ExternalLogger;
 
 pub const PAGE_SIZE: u32 = 256;
 
@@ -23,26 +22,6 @@ pub trait Flash {
     where
         [(); 3 + BYTES]:;
 }
-
-#[derive(Debug)]
-pub struct SpiError {
-    pub priority: u8,
-    pub details: &'static str,
-}
-
-impl SpiError {
-    fn new(priority: u8, details: &'static str) -> SpiError {
-        SpiError { priority, details }
-    }
-}
-
-impl Display for SpiError {
-    fn fmt(&self, f: &mut Formatter) -> core::fmt::Result {
-        write!(f, "SPI Flash Error: {}", self.details)
-    }
-}
-
-impl core::error::Error for SpiError {}
 
 fn get_24bit_addr(addr: u32) -> [u8; 3] {
     return [
@@ -64,7 +43,23 @@ pub struct SpiFlash<'l, SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Exte
 impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: ExternalLogger>
     SpiFlash<'_, SPI, CSPin, L>
 {
-    fn write_bytes<const BYTES: usize>(
+    pub fn new(
+        current_pos: u32,
+        max_addr: u32,
+        spi: SPI,
+        chip_select_pin: CSPin,
+        logger: &'_ mut L,
+    ) -> SpiFlash<'_, SPI, CSPin, L> {
+        SpiFlash {
+            current_pos,
+            max_addr,
+            spi,
+            chip_select_pin,
+            logger,
+        }
+    }
+
+    pub fn write_bytes<const BYTES: usize>(
         &mut self,
         addr: u32,
         bytes: &[u8; BYTES],

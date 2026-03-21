@@ -1,0 +1,4 @@
+# Config already done in Embed.toml
+# probe-rs run --chip STM32L476RG target/thumbv7em-none-eabihf/debug/stdc_stm32_rs --protocol jtag
+
+probe-rs gdb

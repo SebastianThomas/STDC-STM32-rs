@@ -17,9 +17,11 @@ use rtt_target::{rprintln, rtt_init_print};
 use stm32l4xx_hal::{
     delay::Delay,
     hal::spi::MODE_0,
+    i2c::{self, I2c},
     pac::{self, TIM2},
     prelude::*,
-    rtc::{Rtc, RtcConfig},
+    rtc::{Rtc, RtcClockSource, RtcConfig},
+    serial::Serial,
     spi::Spi,
     timer::Timer,
 };
@@ -37,7 +39,9 @@ use stdc_stm32_rs::{
     barometric::{DepthOrAltitude, SURFACE_PA},
     components::{
         MS5849,
-        display::{DisplayState, MAX_STOP_NUMS},
+        display::{DisplayState, MAX_STOP_NUMS, SpiDisplay},
+        flash::SpiFlash,
+        uart_log::{ExternalLogger, UartLogger},
     },
 };
 
@@ -60,6 +64,11 @@ fn main() -> ! {
     let mut flash = dp.FLASH.constrain();
     let mut pwr = dp.PWR.constrain(&mut rcc.apb1r1);
 
+    dp.DBGMCU.cr.modify(|_, w| w.trace_ioen().set_bit());
+
+    // let mut ahb1 = rcc.ahb1;
+    let mut apb1r1 = rcc.apb1r1;
+    // let mut apb1r2 = rcc.apb1r2;
     let mut ahb2 = rcc.ahb2;
     let mut apb2 = rcc.apb2;
     let mut gpioa = dp.GPIOA.split(&mut ahb2);
@@ -69,16 +78,10 @@ fn main() -> ! {
     // TODO: Configure clock to 24 MHz if required with .sysclk(24.MHz())
     let clocks = rcc.cfgr.freeze(&mut flash.acr, &mut pwr);
 
-    Timer::free_running_tim2(dp.TIM2, clocks, 1.kHz(), false, &mut rcc.apb1r1);
+    Timer::free_running_tim2(dp.TIM2, clocks, 1.kHz(), false, &mut apb1r1);
 
-    let rtc_config = RtcConfig::default(); // .clock_config(RtcClockSource::LSE);
-    let mut rtc: Rtc = Rtc::rtc(
-        dp.RTC,
-        &mut rcc.apb1r1,
-        &mut rcc.bdcr,
-        &mut pwr.cr1,
-        rtc_config,
-    );
+    let rtc_config = RtcConfig::default().clock_config(RtcClockSource::LSE);
+    let mut rtc: Rtc = Rtc::rtc(dp.RTC, &mut apb1r1, &mut rcc.bdcr, &mut pwr.cr1, rtc_config);
     // TODO:
     rtc.set_date_time(
         stm32l4xx_hal::datetime::Date {
@@ -98,62 +101,189 @@ fn main() -> ! {
     let (_boot_date, _boot_time) = rtc.get_date_time();
     let _boot_ms: u32 = millis_tim2();
 
-    // Custom SHIELD LEDs, TODO: remove
-    let mut led1 = gpiob
-        .pb6
-        .into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper);
-    let mut led2 = gpioc
-        .pc7
-        .into_push_pull_output(&mut gpioc.moder, &mut gpioc.otyper);
+    // ---------- FINISH BOOT ----------
+
+    // ---------- SETUP Protocols ----------
+
+    // JTAG Set up by default
+    // PA13: JTMS-SWDIO
+    let _tms = gpioa
+        .pa13
+        .into_alternate::<0>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrh);
+    // PA14: JTCK-SWCLK
+    let _tck = gpioa
+        .pa14
+        .into_alternate::<0>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrh);
+    // PA15: JTDI
+    let _tdi = gpioa
+        .pa15
+        .into_alternate::<0>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrh);
+    // PB3: JTDO-TRACESWO
+    let _tdo = gpiob
+        .pb3
+        .into_alternate::<0>(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrl);
 
     // Delay using systick
     let delay: Mutex<RefCell<Delay>> = Mutex::new(RefCell::new(Delay::new(cp.SYST, clocks)));
 
-    // Example: Toggle LEDs
-    loop {
-        led1.toggle();
-        led2.set_high();
-        free(|cs| delay.borrow(cs).borrow_mut().delay_ms(300u16));
-        led2.set_low();
-        free(|cs| delay.borrow(cs).borrow_mut().delay_ms(200u16));
-        break;
+    // LEDs
+    let mut dive_mode_indicator = gpioc
+        .pc8
+        .into_push_pull_output(&mut gpioc.moder, &mut gpioc.otyper);
+    let mut red_indicator = gpioc
+        .pc9
+        .into_push_pull_output(&mut gpioc.moder, &mut gpioc.otyper);
+
+    // USART1 Debugging
+    let usart1_tx = gpioa
+        .pa9
+        .into_alternate(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrh);
+    let usart1_rx = gpioa
+        .pa10
+        .into_alternate(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrh);
+    let debug_uart = Serial::usart1(
+        dp.USART1,
+        (usart1_tx, usart1_rx),
+        115_200.bps(),
+        clocks,
+        &mut apb2,
+    );
+    let (debug_tx, debug_rx) = debug_uart.split();
+    let mut logger = UartLogger::new(debug_tx, debug_rx);
+    if let Err(_e) = logger.log_bytes("Logger to UART set up".as_bytes()) {
+        rprintln!("Logger to UART not set up correctly, could not write");
     }
 
-    rprintln!("Creating Sensor Interface");
+    // Display SPI
+    // TODO: What mode is this in
+    let spi_reset = gpioc
+        .pc4
+        .into_push_pull_output(&mut gpioc.moder, &mut gpioc.otyper);
+    let display_en = gpioc
+        .pc5
+        .into_push_pull_output(&mut gpioc.moder, &mut gpioc.otyper);
+    let not_data_command = gpiob
+        .pb0
+        .into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper);
 
-    // TODO PCB:
+    let mut cs = gpioa
+        .pa4
+        .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
     let sck =
         gpioa
             .pa5
             .into_alternate_push_pull(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl);
-    // TODO PCB:
     let mosi =
         gpioa
             .pa7
             .into_alternate_push_pull(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl);
-    let miso = gpioa
-        .pa6
-        .into_alternate(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl);
-
-    let mut cs = gpioa
-        .pa8
-        .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper); // CS pin
+    // MISO Only for type checker - not connected on PCB, no input possible
+    let miso_nc =
+        gpioa
+            .pa6
+            .into_alternate_push_pull(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl);
     cs.set_high(); // idle high
-    let spi = Spi::spi1(
+    let display_spi = Spi::spi1(
         dp.SPI1,
-        (sck, miso, mosi),
+        (sck, miso_nc, mosi),
         MODE_0,
         1.MHz(),
         clocks,
         &mut apb2,
     );
+    let display = SpiDisplay::new(display_en, display_spi, spi_reset, not_data_command);
 
-    let mut ms5849_spi = MS5849::new_spi(spi, cs, &delay);
+    // Flash SPI
+    let mut flash_cs_nss = gpiob
+        .pb12
+        .into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper);
+    let sck =
+        gpiob
+            .pb13
+            .into_alternate_push_pull(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrh);
+    let miso =
+        gpiob
+            .pb14
+            .into_alternate_push_pull(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrh);
+    let mosi =
+        gpiob
+            .pb15
+            .into_alternate_push_pull(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrh);
+    flash_cs_nss.set_high(); // idle high
+    let flash_spi = Spi::spi2(
+        dp.SPI2,
+        (sck, miso, mosi),
+        MODE_0,
+        1.MHz(),
+        clocks,
+        &mut apb1r1,
+    );
+    let flash = SpiFlash::new(0, 1 << 22, flash_spi, flash_cs_nss, &mut logger);
+    let _ = logger.log_bytes("".as_bytes());
+
+    // Sensor I2C
+    let scl =
+        gpiob
+            .pb6
+            .into_alternate_open_drain(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrl);
+    let sda =
+        gpiob
+            .pb7
+            .into_alternate_open_drain(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrl);
+    let sensor_i2c = I2c::i2c1(
+        dp.I2C1,
+        (scl, sda),
+        i2c::Config::new(100.kHz(), clocks),
+        &mut apb1r1,
+    );
+    let mut ms5849_i2c = MS5849::new_i2c(sensor_i2c, &delay);
+
+    // Battery Status I2C
+    let scl =
+        gpioc
+            .pc0
+            .into_alternate_open_drain(&mut gpioc.moder, &mut gpioc.otyper, &mut gpioc.afrl);
+    let sda =
+        gpioc
+            .pc1
+            .into_alternate_open_drain(&mut gpioc.moder, &mut gpioc.otyper, &mut gpioc.afrl);
+    let battery_status_i2c = I2c::i2c3(
+        dp.I2C3,
+        (scl, sda),
+        i2c::Config::new(100.kHz(), clocks),
+        &mut apb1r1,
+    );
+
+    // Bluetooth UART
+    let usart3_tx = gpiob
+        .pb10
+        .into_alternate(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrh);
+    let usart3_rx = gpiob
+        .pb11
+        .into_alternate(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrh);
+    let bluetooth_uart = Serial::usart3(
+        dp.USART3,
+        (usart3_tx, usart3_rx),
+        115_200.bps(),
+        clocks,
+        &mut apb1r1,
+    );
+    let (bluetooth_tx, bluetooth_rx) = bluetooth_uart.split();
+
+    // Example: Toggle LEDs
+    loop {
+        red_indicator.toggle();
+        dive_mode_indicator.set_high();
+        free(|cs| delay.borrow(cs).borrow_mut().delay_ms(300u16));
+        dive_mode_indicator.set_low();
+        free(|cs| delay.borrow(cs).borrow_mut().delay_ms(200u16));
+        break;
+    }
 
     rprintln!("Starting main waiting loop");
     loop {
-        let pressure = ms5849_spi.measure_pressure_to_bar();
-        match ms5849_spi.depth_or_altitude() {
+        let pressure = ms5849_i2c.measure_pressure_to_bar();
+        match ms5849_i2c.depth_or_altitude() {
             Ok(DepthOrAltitude::Depth { pressure, depth }) => {
                 rprintln!(
                     "Starting Dive: Pressure: {:?}, depth: {:?}",
@@ -200,8 +330,8 @@ fn main() -> ! {
         set_dive_time(duration_since_start);
 
         let measurement_millis = millis_tim2();
-        ms5849_spi.read_spi();
-        match ms5849_spi.depth_or_altitude() {
+        ms5849_i2c.read_i2c();
+        match ms5849_i2c.depth_or_altitude() {
             Ok(DepthOrAltitude::Depth { pressure, depth }) => {
                 rprintln!("Measuring Pressure: {:?}, depth: {:?}", pressure, depth);
                 set_depth(depth);

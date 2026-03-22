@@ -40,13 +40,17 @@ use stdc_stm32_rs::{
     components::{
         MS5849,
         display::{DisplayState, MAX_STOP_NUMS, SpiDisplay},
-        flash::SpiFlash,
+        flash::{Flash, SpiFlash},
         uart_log::{ExternalLogger, UartLogger},
     },
 };
 
 static DISPLAY_STATE: Mutex<RefCell<DisplayState>> =
     Mutex::new(RefCell::new(DisplayState::default()));
+static SERIAL_NUMBER: [u8; 4] = [0, 0, 0, 0];
+
+// TODO: Initial Position
+const INITIAL_FLASH_ADDRESS: u32 = 1 << 21;
 
 #[entry]
 fn main() -> ! {
@@ -149,10 +153,9 @@ fn main() -> ! {
         &mut apb2,
     );
     let (debug_tx, debug_rx) = debug_uart.split();
-    let mut logger = UartLogger::new(debug_tx, debug_rx);
-    if let Err(_e) = logger.log_bytes("Logger to UART set up".as_bytes()) {
-        rprintln!("Logger to UART not set up correctly, could not write");
-    }
+    let logger = UartLogger::new(debug_tx, debug_rx);
+    let logger = Mutex::new(RefCell::new(logger));
+    log_bytes(&logger, "Logger to UART set up".as_bytes());
 
     // Display SPI
     // TODO: What mode is this in
@@ -191,7 +194,8 @@ fn main() -> ! {
         clocks,
         &mut apb2,
     );
-    let display = SpiDisplay::new(display_en, display_spi, spi_reset, not_data_command);
+    let mut display = SpiDisplay::new(display_en, display_spi, spi_reset, not_data_command);
+    let _ = display.turn_on();
 
     // Flash SPI
     let mut flash_cs_nss = gpiob
@@ -218,8 +222,13 @@ fn main() -> ! {
         clocks,
         &mut apb1r1,
     );
-    let flash = SpiFlash::new(0, 1 << 22, flash_spi, flash_cs_nss, &mut logger);
-    let _ = logger.log_bytes("".as_bytes());
+    let mut flash = SpiFlash::new(0, 1 << 22, flash_spi, flash_cs_nss, |bytes: &[u8]| {
+        log_bytes(&logger, bytes);
+    });
+    if let Err(flash_rst_err) = flash.set_pos(INITIAL_FLASH_ADDRESS) {
+        log_bytes(&logger, flash_rst_err.details.as_bytes());
+    }
+    let _ = flash.write::<4>(&SERIAL_NUMBER);
 
     // Sensor I2C
     let scl =
@@ -398,6 +407,14 @@ fn refresh_display() {
 fn refresh_display_with_state(display_state: Ref<DisplayState>) {
     let _duration_chars = show_duration(display_state.dive_time);
     let _meters_chars = format_f32::<' ', 3, 1>(display_state.depth.to_f32());
+}
+
+fn log_bytes<L: ExternalLogger>(logger: &Mutex<RefCell<L>>, bytes: &[u8]) {
+    free(|cs| {
+        if let Err(_) = logger.borrow(cs).borrow_mut().log_bytes(bytes) {
+            rprintln!("Failed logging bytes to UART");
+        }
+    });
 }
 
 fn millis_tim2() -> u32 {

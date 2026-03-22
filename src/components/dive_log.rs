@@ -65,7 +65,7 @@ where
 
 impl<const GAS_NR: u8> LogDiveControlDataBlock<GAS_NR>
 where
-    [(); 3 + 24 + GAS_NR as usize * 3]:,
+    [(); 4 + 24 + GAS_NR as usize * 3]:,
 {
     // const LEN: usize = 24 + GAS_NR as usize * 3;
 
@@ -100,7 +100,7 @@ where
 
     pub fn write<F: Flash>(&self, flash: &mut F) -> Result<u32, F::Error>
     where
-        [(); 3 + (24 + GAS_NR as usize * 3)]:,
+        [(); 4 + (24 + GAS_NR as usize * 3)]:,
     {
         let mut bytes: [u8; 24 + GAS_NR as usize * 3] = [0; 24 + GAS_NR as usize * 3];
         bytes[0] = (self.firmware_version >> 8 & 0xFF) as u8;

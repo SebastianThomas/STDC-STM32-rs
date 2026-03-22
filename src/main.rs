@@ -228,7 +228,7 @@ fn main() -> ! {
     if let Err(flash_rst_err) = flash.set_pos(INITIAL_FLASH_ADDRESS) {
         log_bytes(&logger, flash_rst_err.details.as_bytes());
     }
-    let _ = flash.write::<4>(&SERIAL_NUMBER);
+    let _ = flash.write(&SERIAL_NUMBER);
 
     // Sensor I2C
     let scl =

@@ -128,7 +128,7 @@ where
         bytes[22] = self.gf_high;
         bytes[23] = self.gas_nr;
 
-        bytes[24..24 + GAS_NR as usize * 3 - 1].copy_from_slice(&self.gas_content);
+        bytes[24..=24 + GAS_NR as usize * 3 - 1].copy_from_slice(&self.gas_content);
 
         flash.write::<{ 24 + GAS_NR as usize * 3 }>(&bytes)
     }

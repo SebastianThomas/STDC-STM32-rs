@@ -88,21 +88,21 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
     pub fn erase_64k(&mut self, addr: u32) -> Result<(), SpiError> {
         let mut buf = [0u8; 4];
         buf[0] = ERASE_64K_INSTRUCTION;
-        buf[1..3].copy_from_slice(&get_24bit_addr(addr));
+        buf[1..=3].copy_from_slice(&get_24bit_addr(addr));
         self.spi_write_operation(&buf)
     }
 
     pub fn erase_32k(&mut self, addr: u32) -> Result<(), SpiError> {
         let mut buf = [0u8; 4];
         buf[0] = ERASE_32K_INSTRUCTION;
-        buf[1..3].copy_from_slice(&get_24bit_addr(addr));
+        buf[1..=3].copy_from_slice(&get_24bit_addr(addr));
         self.spi_write_operation(&buf)
     }
 
     pub fn erase_4k(&mut self, addr: u32) -> Result<(), SpiError> {
         let mut buf = [0u8; 4];
         buf[0] = ERASE_4K_INSTRUCTION;
-        buf[1..3].copy_from_slice(&get_24bit_addr(addr));
+        buf[1..=3].copy_from_slice(&get_24bit_addr(addr));
         self.spi_write_operation(&buf)
     }
 
@@ -121,8 +121,8 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
         let mut buf: [u8; 4 + BYTES] = [0; 4 + BYTES];
         let addr_buf = get_24bit_addr(addr);
         buf[0] = PAGE_PROGRAM_INSTRUCTION;
-        buf[1..3].copy_from_slice(&addr_buf);
-        buf[4..3 + BYTES].copy_from_slice(bytes);
+        buf[1..=3].copy_from_slice(&addr_buf);
+        buf[4..=3 + BYTES].copy_from_slice(bytes);
         self.spi_write_operation(&buf)
     }
 

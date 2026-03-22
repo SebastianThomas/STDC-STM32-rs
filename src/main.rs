@@ -39,6 +39,7 @@ use stdc_stm32_rs::{
     barometric::{DepthOrAltitude, SURFACE_PA},
     components::{
         MS5849,
+        bluetooth::UartBluetoothModule,
         display::{DisplayState, MAX_STOP_NUMS, SpiDisplay},
         flash::{Flash, SpiFlash},
         uart_log::{ExternalLogger, UartLogger},
@@ -56,6 +57,7 @@ const INITIAL_FLASH_ADDRESS: u32 = 1 << 21;
 fn main() -> ! {
     rtt_init_print!();
 
+    // ---------- START BOOT ----------
     rprintln!("Booting..");
 
     // 0001: Configure Peripherals, Clocks
@@ -107,7 +109,7 @@ fn main() -> ! {
 
     // ---------- FINISH BOOT ----------
 
-    // ---------- SETUP Protocols ----------
+    // ---------- START SETUP Protocols ----------
 
     // JTAG Set up by default
     // PA13: JTMS-SWDIO
@@ -266,6 +268,9 @@ fn main() -> ! {
     );
 
     // Bluetooth UART
+    let bluetooth_tx_ind = gpiob
+        .pb2
+        .into_pull_down_input(&mut gpiob.moder, &mut gpiob.pupdr);
     let usart3_tx = gpiob
         .pb10
         .into_alternate(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrh);
@@ -280,6 +285,9 @@ fn main() -> ! {
         &mut apb1r1,
     );
     let (bluetooth_tx, bluetooth_rx) = bluetooth_uart.split();
+    let bluetooth = UartBluetoothModule::new(bluetooth_tx, bluetooth_rx, bluetooth_tx_ind);
+
+    // ---------- FINISH SETUP Protocols ----------
 
     // Example: Toggle LEDs
     loop {
@@ -313,7 +321,9 @@ fn main() -> ! {
                 pressure,
                 err,
             ),
-        };
+        }
+        log_bytes(&logger, "Sleeping for 50ms".as_bytes());
+        free(|cs| delay.borrow(cs).borrow_mut().delay_ms(50u16));
     }
 
     let dive_start_millis = millis_tim2();

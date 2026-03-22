@@ -1,3 +1,4 @@
+pub mod bluetooth;
 pub mod display;
 pub mod dive_log;
 pub mod flash;

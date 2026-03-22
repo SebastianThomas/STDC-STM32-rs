@@ -4,7 +4,6 @@ use stm32l4xx_hal::hal::{
 };
 
 use super::spi_utils::SpiError;
-use super::uart_log::ExternalLogger;
 
 pub const PAGE_SIZE: u32 = 256;
 
@@ -22,7 +21,7 @@ pub trait Flash {
 
     fn write<const BYTES: usize>(&mut self, bytes: &[u8; BYTES]) -> Result<u32, Self::Error>
     where
-        [(); 4 + BYTES]:;
+        [(); 4 + BYTES]: Sized;
 }
 
 fn get_24bit_addr(addr: u32) -> [u8; 3] {
@@ -65,7 +64,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
         bytes: &[u8; BYTES],
     ) -> Result<(), SpiError>
     where
-        [(); 4 + BYTES]:,
+        [(); 4 + BYTES]: Sized,
     {
         let offset = addr % PAGE_SIZE;
         // let base = addr - offset;

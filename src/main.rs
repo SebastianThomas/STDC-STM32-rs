@@ -245,7 +245,9 @@ fn main() -> ! {
         i2c::Config::new(100.kHz(), clocks),
         &mut apb1r1,
     );
-    let mut ms5849_i2c = MS5849::new_i2c(sensor_i2c, &delay);
+    let mut ms5849_i2c = MS5849::new_i2c(sensor_i2c, &delay, |bytes: &[u8]| {
+        log_bytes(&logger, bytes);
+    });
 
     // Battery Status I2C
     let scl =

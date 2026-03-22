@@ -55,7 +55,7 @@ impl SensorConfiguration {
 
 #[allow(non_camel_case_types)]
 #[allow(non_snake_case)]
-pub struct MS5849<'a, INTERFACE, P> {
+pub struct MS5849<'a, INTERFACE, P, L: Fn(&[u8]) -> ()> {
     interface: INTERFACE,
     config: SensorConfiguration,
     cs: Option<P>,
@@ -65,20 +65,25 @@ pub struct MS5849<'a, INTERFACE, P> {
     D2_temp: Option<u32>,
     C: [u16; 10],
     delay: &'a Mutex<RefCell<Delay>>,
+    log_bytes: L,
 }
 
-fn scan_i2c<I: Write>(i2c: &mut I)
+fn scan_i2c<I: Write, L: Fn(&[u8]) -> ()>(i2c: &mut I, log_bytes: L)
 where
     <I as cortex_m::prelude::_embedded_hal_blocking_i2c_Write>::Error: Debug,
 {
     rprintln!("Scanning I2C bus...");
 
-    for addr in 0x03..0x78 {
+    for addr in 0x03u8..0x78u8 {
         // valid 7-bit I2C addresses
         // Try a zero-length write (common method to ping device)
         let result = i2c.write(addr, &[]);
         match result {
-            Ok(_) => rprintln!("I2C device found at 0x{:02X}", addr),
+            Ok(_) => {
+                log_bytes("I2C device found at 0x".as_bytes());
+                log_bytes(&[addr, '\n' as u8]);
+                rprintln!("I2C device found at 0x{:02X}", addr);
+            }
             // Err(res) => rprintln!("No I2C device found at 0x{:02X}: {:?}", addr, res),
             Err(_) => (),
         }
@@ -118,7 +123,7 @@ fn wait_ms(delay: &Mutex<RefCell<Delay>>, ms: u8) {
     free(|cs| delay.borrow(cs).borrow_mut().delay_ms(ms)); // Max conversion time per datasheet
 }
 
-impl<'a, SPI, P> MS5849<'a, SPI, P>
+impl<'a, SPI, P, L: Fn(&[u8]) -> ()> MS5849<'a, SPI, P, L>
 where
     SPI: spi::Transfer<u8> + spi::Write<u8>,
     P: OutputPin,
@@ -127,7 +132,8 @@ where
         mut spi: SPI,
         mut cs: P,
         delay: &'a Mutex<RefCell<Delay>>,
-    ) -> MS5849<'a, SPI, P> {
+        log_bytes: L,
+    ) -> MS5849<'a, SPI, P, L> {
         let mut cal: [u16; 10] = [0; 10];
 
         rprintln!("Created SPI Interface");
@@ -182,6 +188,7 @@ where
             D2_temp: None,
             C: cal,
             delay,
+            log_bytes,
         }
     }
 
@@ -216,18 +223,22 @@ where
     }
 }
 
-impl<'a, I: Write + Read + WriteRead> MS5849<'a, I, ()>
+impl<'a, I: Write + Read + WriteRead, L: Fn(&[u8]) -> ()> MS5849<'a, I, (), L>
 where
     <I as Read>::Error: Debug,
     <I as Write>::Error: Debug,
     <I as WriteRead>::Error: Debug,
 {
-    pub fn new_i2c(mut i2c: I, delay: &'a Mutex<RefCell<Delay>>) -> MS5849<'a, I, ()> {
+    pub fn new_i2c(
+        mut i2c: I,
+        delay: &'a Mutex<RefCell<Delay>>,
+        log_bytes: L,
+    ) -> MS5849<'a, I, (), L> {
         let mut cal: [u16; 10] = [0; 10];
 
         rprintln!("Created I2C Interface");
 
-        scan_i2c(&mut i2c);
+        scan_i2c(&mut i2c, &log_bytes);
 
         /* Reset and Calibrate */
         // Reset the MS5837, per datasheet
@@ -269,6 +280,7 @@ where
             D2_temp: None,
             C: cal,
             delay,
+            log_bytes,
         }
     }
 
@@ -299,7 +311,7 @@ where
     }
 }
 
-impl<'a, I, P> MS5849<'a, I, P> {
+impl<'a, I, P, L: Fn(&[u8]) -> ()> MS5849<'a, I, P, L> {
     pub fn measure_pressure_to_bar(&self) -> Option<Bar> {
         self.pressure().map(|pa: Pa| pa.to_bar())
     }

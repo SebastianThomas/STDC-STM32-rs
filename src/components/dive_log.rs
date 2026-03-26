@@ -1,3 +1,5 @@
+use thalmann::gas::GasMix;
+
 use crate::components::flash::Flash;
 
 pub const FIRMWARE_VERSION: u16 = 0;
@@ -41,9 +43,9 @@ pub enum DecoAlgorithm {
     LinearExponential,
 }
 
-pub struct LogDiveControlDataBlock<const GAS_NR: u8>
+pub struct LogDiveControlDataBlock<const GAS_NR: usize>
 where
-    [(); GAS_NR as usize * 3]:,
+    [(); GAS_NR * 3]: Sized,
 {
     pub firmware_version: u16,
     pub computer_serial_nr: u8,
@@ -60,25 +62,40 @@ where
     pub gf_low: u8,
     pub gf_high: u8,
     pub gas_nr: u8,
-    pub gas_content: [u8; GAS_NR as usize * 3],
+    pub gas_content: [u8; GAS_NR * 3],
 }
 
-impl<const GAS_NR: u8> LogDiveControlDataBlock<GAS_NR>
+fn get_gas_content<const GAS_NR: usize>(gas_content: &[GasMix<f32>; GAS_NR]) -> [u8; GAS_NR * 3]
 where
-    [(); 4 + 24 + GAS_NR as usize * 3]:,
-    [(); 24 + GAS_NR as usize * 3]: Sized,
+    [(); GAS_NR * 3]: Sized,
 {
-    // const LEN: usize = 24 + GAS_NR as usize * 3;
+    let mut buf = [0u8; GAS_NR * 3];
+    for i in 0..GAS_NR {
+        buf[i * 3] = gas_content[i].fo2() as u8;
+        buf[i * 3 + 1] = gas_content[i].fn2() as u8;
+        buf[i * 3 + 2] = gas_content[i].fhe() as u8;
+    }
+    buf
+}
 
+impl<const GAS_NR: usize> LogDiveControlDataBlock<GAS_NR>
+where
+    [(); 4 + 24 + GAS_NR * 3]: Sized,
+    [(); 24 + GAS_NR * 3]: Sized,
+    [(); GAS_NR * 3]: Sized,
+{
     pub fn new(
         start_epoch_seconds: u32,
         surface_interval_seconds: u32,
         dive_number: u16,
-        surface_pressure_e2_pa: u16,
-        surface_temperature: f32,
+        surface_pressure_hpa: u16,
+        surface_temperature: i8,
         ascent_rate_agg_seconds: u8,
-        gas_content: [u8; GAS_NR as usize * 3],
-    ) -> LogDiveControlDataBlock<GAS_NR> {
+        gas_content: &[GasMix<f32>; GAS_NR],
+    ) -> Self
+    where
+        [(); GAS_NR * 3]: Sized,
+    {
         LogDiveControlDataBlock {
             firmware_version: FIRMWARE_VERSION,
             computer_serial_nr: COMPUTER_SERIAL_NUMBER,
@@ -86,26 +103,26 @@ where
             time_offset: start_epoch_seconds,
             surface_interval: surface_interval_seconds,
             dive_number,
-            surface_pressure: surface_pressure_e2_pa,
-            surface_temperature: (surface_temperature * 2.0) as i8,
+            surface_pressure: surface_pressure_hpa,
+            surface_temperature: surface_temperature * 2,
             ascent_rate_agg: ascent_rate_agg_seconds,
             salinity: SALINITY,
             dive_mode: DIVE_MODE,
             deco_algorithm: DECO_ALGORITHM,
             gf_low: GF_LOW,
             gf_high: GF_HIGH,
-            gas_nr: GAS_NR,
-            gas_content,
+            gas_nr: GAS_NR as u8,
+            gas_content: get_gas_content(gas_content),
         }
     }
 
     pub fn write<F: Flash>(&self, flash: &mut F) -> Result<u32, F::Error>
     where
-        [(); 4 + (24 + GAS_NR as usize * 3)]:,
-        [(); 4 + (24 + GAS_NR as usize * 3) + 0]: Sized,
-        [(); 24 + GAS_NR as usize * 3 + 0]: Sized,
+        [(); 4 + (24 + GAS_NR * 3)]: Sized,
+        [(); 4 + (24 + GAS_NR * 3) + 0]: Sized,
+        [(); 24 + GAS_NR * 3 + 0]: Sized,
     {
-        let mut bytes: [u8; 24 + GAS_NR as usize * 3] = [0; 24 + GAS_NR as usize * 3];
+        let mut bytes: [u8; 24 + GAS_NR * 3] = [0; 24 + GAS_NR * 3];
         bytes[0] = (self.firmware_version >> 8 & 0xFF) as u8;
         bytes[1] = (self.firmware_version & 0xFF) as u8;
         bytes[2] = self.computer_serial_nr;
@@ -131,9 +148,9 @@ where
         bytes[22] = self.gf_high;
         bytes[23] = self.gas_nr;
 
-        bytes[24..=24 + GAS_NR as usize * 3 - 1].copy_from_slice(&self.gas_content);
+        bytes[24..=24 + GAS_NR * 3 - 1].copy_from_slice(&self.gas_content);
 
-        flash.write::<{ 24 + GAS_NR as usize * 3 }>(&bytes)
+        flash.write::<{ 24 + GAS_NR * 3 }>(&bytes)
     }
 }
 

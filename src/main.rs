@@ -36,11 +36,13 @@ use thalmann::{
 };
 
 use stdc_stm32_rs::{
+    algorithms::helpers::datetime_to_epoch_seconds,
     barometric::{DepthOrAltitude, SURFACE_PA},
     components::{
         MS5849,
         bluetooth::UartBluetoothModule,
         display::{DisplayState, MAX_STOP_NUMS, SpiDisplay},
+        dive_log::LogDiveControlDataBlock,
         flash::{Flash, SpiFlash},
         uart_log::{ExternalLogger, UartLogger},
     },
@@ -343,6 +345,7 @@ fn main() -> ! {
     let dive_start_millis = millis_tim2();
 
     let gases = [thalmann::gas::AIR];
+    // TODO: Measured Surface Pressure
     let surface = SURFACE_PA;
     let dive_profile = DiveProfile {
         dive_id: 1,
@@ -357,6 +360,28 @@ fn main() -> ! {
     let loading = loadings_from_dive_profile(&TISSUES, &dive_profile, &XVAL_HE9_040_F32, surface);
 
     let current_gas_idx: usize = 0;
+
+    let (start_date, start_time) = rtc.get_date_time();
+    let start_epoch_seconds = datetime_to_epoch_seconds(start_date, start_time);
+    let surface_interval_seconds = 0;
+    let dive_number = 0;
+    let surface_pressure_hpa = (surface.to_hpa().to_f32()) as u16;
+    let surface_temperature_2 = 0 * 2;
+    let ascent_rate_agg_seconds = 4;
+    let gas_content = gases;
+    let dive_control_data_block = LogDiveControlDataBlock::new(
+        start_epoch_seconds,
+        surface_interval_seconds,
+        dive_number,
+        surface_pressure_hpa,
+        surface_temperature_2,
+        ascent_rate_agg_seconds,
+        &gas_content,
+    );
+    if let Err(e) = dive_control_data_block.write(&mut flash) {
+        log_bytes(&logger, b"Failed writing dive control data block.");
+        log_bytes(&logger, e.details.as_bytes());
+    }
 
     loop {
         let current_millis = millis_tim2_since(dive_start_millis);

@@ -227,7 +227,21 @@ fn main() -> ! {
     let mut flash = SpiFlash::new(0, 1 << 22, flash_spi, flash_cs_nss, |bytes: &[u8]| {
         log_bytes(&logger, bytes);
     });
+
+    let cur_addr = flash
+        .read::<4>(INITIAL_FLASH_ADDRESS)
+        .map(u32::from_be_bytes);
+    if cur_addr.is_err() || *cur_addr.as_ref().unwrap() == 0 {
+        let new_pos = INITIAL_FLASH_ADDRESS + 4;
+        let new_pos_u8 = new_pos.to_be_bytes();
+        let _ = flash.write(&new_pos_u8);
+        let _ = flash.set_pos(new_pos);
+    } else {
+        // Unwrap safe, above if allows err
+        let _ = flash.set_pos(cur_addr.unwrap());
+    }
     if let Err(flash_rst_err) = flash.set_pos(INITIAL_FLASH_ADDRESS) {
+        log_bytes(&logger, b"Failed setting initial flash address position");
         log_bytes(&logger, flash_rst_err.details.as_bytes());
     }
     let _ = flash.write(&SERIAL_NUMBER);

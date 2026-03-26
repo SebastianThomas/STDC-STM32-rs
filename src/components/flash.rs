@@ -7,6 +7,7 @@ use super::spi_utils::SpiError;
 
 pub const PAGE_SIZE: u32 = 256;
 
+const READ_DATA_INSTRUCTION: u8 = 0x03;
 const PAGE_PROGRAM_INSTRUCTION: u8 = 0x02;
 const WRITE_ENABLE_INSTRUCTION: u8 = 0x04;
 const ERASE_CHIP_INSTRUCTION: u8 = 0xC7;
@@ -21,7 +22,14 @@ pub trait Flash {
 
     fn write<const BYTES: usize>(&mut self, bytes: &[u8; BYTES]) -> Result<u32, Self::Error>
     where
-        [(); 4 + BYTES]: Sized;
+        [(); 4 + BYTES]: Sized,
+        [(); 4 + BYTES + 0]: Sized,
+        [(); BYTES + 0]: Sized;
+
+    fn read<const BYTES: usize>(&mut self, position: u32) -> Result<[u8; BYTES], Self::Error>
+    where
+        [(); 4 + BYTES]: Sized,
+        [(); BYTES + 0]: Sized;
 }
 
 fn get_24bit_addr(addr: u32) -> [u8; 3] {
@@ -64,7 +72,9 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
         bytes: &[u8; BYTES],
     ) -> Result<(), SpiError>
     where
-        [(); 4 + BYTES]: Sized,
+        [(); 4 + BYTES]:,
+        [(); BYTES + 0]:,
+        [(); 4 + BYTES + 0]:,
     {
         let offset = addr % PAGE_SIZE;
         // let base = addr - offset;
@@ -78,6 +88,16 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
         let res = self.program_page(addr, bytes);
         let write_res = self.write_enable(false);
         if let Err(e) = res { Err(e) } else { write_res }
+    }
+
+    pub fn read_bytes<const BYTES: usize>(&mut self, addr: u32) -> Result<[u8; BYTES], SpiError>
+    where
+        [(); 4 + BYTES]:,
+    {
+        let mut buf = [0u8; 4];
+        buf[0] = READ_DATA_INSTRUCTION;
+        buf[1..=3].copy_from_slice(&get_24bit_addr(addr));
+        self.spi_io_operation::<4, { BYTES }>(&buf)
     }
 
     pub fn erase_chip(&mut self) -> Result<(), SpiError> {
@@ -115,14 +135,16 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
         bytes: &[u8; BYTES],
     ) -> Result<(), SpiError>
     where
-        [(); 4 + BYTES]:,
+        [(); 4 + BYTES]: Sized,
+        [(); 4 + BYTES + 0]: Sized,
+        [(); BYTES + 0]: Sized,
     {
         let mut buf: [u8; 4 + BYTES] = [0; 4 + BYTES];
         let addr_buf = get_24bit_addr(addr);
         buf[0] = PAGE_PROGRAM_INSTRUCTION;
         buf[1..=3].copy_from_slice(&addr_buf);
         buf[4..=3 + BYTES].copy_from_slice(bytes);
-        self.spi_write_operation(&buf)
+        self.spi_write_operation::<{ 4 + BYTES }>(&buf)
     }
 
     /**
@@ -131,7 +153,23 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
     fn spi_write_operation<const BYTES: usize>(
         &mut self,
         op_data: &[u8; BYTES],
-    ) -> Result<(), SpiError> {
+    ) -> Result<(), SpiError>
+    where
+        [(); BYTES + 0]:,
+    {
+        self.spi_io_operation::<BYTES, 0>(op_data).map(|_| {})
+    }
+
+    /**
+     * Operations with Data In
+     */
+    fn spi_io_operation<const WBYTES: usize, const RBYTES: usize>(
+        &mut self,
+        op_data: &[u8; WBYTES],
+    ) -> Result<[u8; RBYTES], SpiError>
+    where
+        [(); WBYTES + RBYTES]:,
+    {
         // CS Low
         let low = self.chip_select_pin.set_low();
         if let Err(_) = low {
@@ -139,19 +177,42 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
             let _ = (self.logger)(msg.as_bytes());
             return Err(SpiError::new(1, msg));
         };
-        let write_res = self.spi.write(op_data);
-        let write_res = match write_res {
-            Ok(_) => Ok(()),
-            Err(_) => {
-                let msg = "Failed executing write operation";
-                let _ = (self.logger)(msg.as_bytes());
-                Err(SpiError::new(0, msg))
+
+        let res = if RBYTES == 0 {
+            match self.spi.write(op_data) {
+                Ok(_) => Ok([0; RBYTES]),
+                Err(_) => {
+                    let msg = "Failed executing write operation";
+                    let _ = (self.logger)(msg.as_bytes());
+                    Err(SpiError::new(0, msg))
+                }
+            }
+        } else {
+            let mut buf = [0u8; WBYTES + RBYTES];
+
+            // Fill command + address
+            buf[0..=WBYTES].copy_from_slice(op_data);
+            // Remaining bytes = dummy writes (0x00)
+            for i in 0..RBYTES {
+                buf[WBYTES + i] = 0x00;
+            }
+            match self.spi.transfer(&mut buf) {
+                Ok(_) => {
+                    let mut res = [0u8; RBYTES];
+                    res.copy_from_slice(&buf[WBYTES..]);
+                    Ok(res)
+                }
+                Err(_) => {
+                    let msg = "Failed executing rw operation";
+                    let _ = (self.logger)(msg.as_bytes());
+                    Err(SpiError::new(0, msg))
+                }
             }
         };
 
         // CS High
         let high = self.chip_select_pin.set_high();
-        let high_res: Result<_, SpiError> = match high {
+        let _high_res: Result<_, SpiError> = match high {
             Ok(v) => Ok(v),
             Err(_) => {
                 let msg = "Failed setting CS to high";
@@ -160,11 +221,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
             }
         };
 
-        match (write_res, high_res) {
-            (Ok(_), Ok(_)) => Ok(()),
-            (Err(e), _) => Err(e),
-            (_, e) => e,
-        }
+        res
     }
 }
 
@@ -186,7 +243,9 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> Flash
 
     fn write<const BYTES: usize>(&mut self, data: &[u8; BYTES]) -> Result<u32, Self::Error>
     where
-        [(); 4 + BYTES]:,
+        [(); 4 + BYTES]: Sized,
+        [(); 4 + BYTES + 0]: Sized,
+        [(); BYTES + 0]: Sized,
     {
         let bytes = BYTES as u32;
         let start_addr = self.current_pos;
@@ -198,5 +257,19 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> Flash
         self.write_bytes(start_addr, data)?;
         self.current_pos += bytes;
         Ok(start_addr)
+    }
+
+    fn read<const BYTES: usize>(&mut self, pos: u32) -> Result<[u8; BYTES], Self::Error>
+    where
+        [(); 4 + BYTES]: Sized,
+        [(); BYTES + 0]: Sized,
+    {
+        let bytes = BYTES as u32;
+        if pos + bytes > self.max_addr {
+            let msg = "Out of Bounds read attempted, aborting";
+            let _ = (self.logger)(msg.as_bytes());
+            return Err(SpiError::new(0, msg));
+        }
+        self.read_bytes(pos)
     }
 }

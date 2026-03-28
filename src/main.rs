@@ -38,15 +38,15 @@ use thalmann::{
     gas::{GasMix, TissuesLoading},
     loadings_from_dive_profile,
     mptt::{NUM_TISSUES, TISSUES, XVAL_HE9_040_F32},
-    pressure_unit::{Bar, Pa, Pressure},
+    pressure_unit::{Bar, Pa, Pressure, msw},
 };
 
 use stdc_stm32_rs::{
     algorithms::{
         helpers::datetime_to_epoch_seconds,
-        rate_algorithm::{DiffAimdRateAlgorithm, DynamicDiffAimdRateAlgorithm, RateAlgorithm},
+        rate_algorithm::{DynamicDiffAimdRateAlgorithm, FixedRateAlgorithm, RateAlgorithm},
     },
-    barometric::{DepthOrAltitude, SURFACE_PA},
+    barometric::DepthOrAltitude,
     components::{
         MS5849,
         bluetooth::UartBluetoothModule,
@@ -330,7 +330,76 @@ fn main() -> ! {
 
     rprintln!("Starting main waiting loop");
     loop {
-        let pressure = ms5849_i2c.measure_pressure_to_bar();
+        let (surface_pressure, first_dive_pressure) =
+            surface_interval_wait(&mut ms5849_i2c, &mut flash, &delay, &rtc, &logger);
+        start_log_dive(
+            &mut ms5849_i2c,
+            &mut flash,
+            &rtc,
+            &logger,
+            (surface_pressure + first_dive_pressure) / 2.0,
+        );
+    }
+}
+
+fn surface_interval_wait<
+    I: Write + Read + WriteRead,
+    LFn: Fn(&[u8]) -> (),
+    F: Flash,
+    L: ExternalLogger,
+>(
+    ms5849_i2c: &mut MS5849<'_, I, (), LFn>,
+    flash: &mut F,
+    delay: &Mutex<RefCell<Delay>>,
+    rtc: &Rtc,
+    logger: &Mutex<RefCell<L>>,
+) -> (Pa, Pa)
+where
+    <I as Read>::Error: Debug,
+    <I as Write>::Error: Debug,
+    <I as WriteRead>::Error: Debug,
+{
+    let mut prev_surface_altitude = None;
+    let mut flash_log_algorithm = FixedRateAlgorithm::new(60_000);
+    let mut last_logged_millis = 0;
+    loop {
+        let pressure = match ms5849_i2c.measure_pressure_to_pa() {
+            Some(p) => p,
+            None => {
+                rprintln!("Got error while measuring pressure");
+                continue;
+            }
+        };
+        let current_measurement_millis = millis_tim2();
+        let next_flash_iter =
+            flash_log_algorithm.next_iter(last_logged_millis, current_measurement_millis);
+        let next_flash_log = next_flash_iter.map(|n| last_logged_millis + n);
+        if let Ok(n) = next_flash_log
+            && n >= current_measurement_millis
+        {
+            let temperature = 0;
+            let battery = 0;
+            match LogPointData::new(
+                LogPointMetadata::new(false, false, LevelState::Error, [false; 4]),
+                &DiveMeasurement {
+                    time_ms: current_measurement_millis as usize,
+                    depth: pressure,
+                    gas: 0b01111111,
+                },
+                0,
+                temperature,
+                battery,
+            )
+            .write(flash)
+            {
+                Ok(_) => {
+                    last_logged_millis = current_measurement_millis;
+                }
+                Err(e) => {
+                    rprintln!("Got error writing new measurement to flash{:?}", e);
+                }
+            }
+        }
         match ms5849_i2c.depth_or_altitude() {
             Ok(DepthOrAltitude::Depth { pressure, depth }) => {
                 rprintln!(
@@ -338,33 +407,33 @@ fn main() -> ! {
                     pressure,
                     depth
                 );
-                break;
+                return (pressure, prev_surface_altitude.unwrap_or(pressure));
             }
-            Ok(DepthOrAltitude::Altitude { pressure, altitude }) => rprintln!(
-                "Measuring Pressure: {:?}, altitude: {:?}",
-                pressure,
-                altitude
-            ),
+            Ok(DepthOrAltitude::Altitude { pressure, altitude }) => {
+                prev_surface_altitude = Some(pressure);
+                rprintln!(
+                    "Measuring Pressure: {:?}, altitude: {:?}",
+                    pressure,
+                    altitude
+                )
+            }
             Err(err) => rprintln!(
                 "Got error while reading depth for pressure {:?}: {:?}.",
                 pressure,
                 err,
             ),
         }
-        log_bytes(&logger, "Sleeping for 50ms".as_bytes());
-        free(|cs| delay.borrow(cs).borrow_mut().delay_ms(50u16));
-    }
-    loop {
-        start_dive(&mut ms5849_i2c, &mut flash, &rtc, &logger);
-        // TODO: Finished dive, enter surface mode
+        log_bytes(&logger, "Sleeping for 5000ms".as_bytes());
+        free(|cs| delay.borrow(cs).borrow_mut().delay_ms(3000u16));
     }
 }
 
-fn start_dive<I: Write + Read + WriteRead, LFn: Fn(&[u8]) -> (), F: Flash, L: ExternalLogger>(
+fn start_log_dive<I: Write + Read + WriteRead, LFn: Fn(&[u8]) -> (), F: Flash, L: ExternalLogger>(
     ms5849_i2c: &mut MS5849<'_, I, (), LFn>,
     flash: &mut F,
     rtc: &Rtc,
     logger: &Mutex<RefCell<L>>,
+    surface_pressure: Pa,
 ) where
     <I as Read>::Error: Debug,
     <I as Write>::Error: Debug,
@@ -373,20 +442,18 @@ fn start_dive<I: Write + Read + WriteRead, LFn: Fn(&[u8]) -> (), F: Flash, L: Ex
     let dive_start_millis = millis_tim2();
 
     let gases = [thalmann::gas::AIR];
-    // TODO: Measured Surface Pressure
-    let surface = SURFACE_PA;
     let dive_profile = DiveProfile {
         dive_id: 1,
-        max_depth: surface,
+        max_depth: surface_pressure,
         gases,
         measurements: [DiveMeasurement {
-            depth: surface.to_pa(),
+            depth: surface_pressure,
             time_ms: dive_start_millis as usize,
             gas: 0,
         }],
     };
     let mut loading =
-        loadings_from_dive_profile(&TISSUES, &dive_profile, &XVAL_HE9_040_F32, surface);
+        loadings_from_dive_profile(&TISSUES, &dive_profile, &XVAL_HE9_040_F32, surface_pressure);
 
     let mut current_gas_mode_idx: CurrentDiveModeWithInfo =
         CurrentDiveModeWithInfo::OC { gas_idx: 0 };
@@ -395,7 +462,7 @@ fn start_dive<I: Write + Read + WriteRead, LFn: Fn(&[u8]) -> (), F: Flash, L: Ex
     let start_epoch_seconds = datetime_to_epoch_seconds(start_date, start_time);
     let surface_interval_seconds = 0;
     let dive_number = 0;
-    let surface_pressure_hpa = (surface.to_hpa().to_f32()) as u16;
+    let surface_pressure_hpa = (surface_pressure.to_hpa().to_f32()) as u16;
     let surface_temperature_2 = 0 * 2;
     let ascent_rate_agg_seconds = 4;
     let gas_content = gases;
@@ -411,6 +478,7 @@ fn start_dive<I: Write + Read + WriteRead, LFn: Fn(&[u8]) -> (), F: Flash, L: Ex
 
     dive_start_and_loop(
         dive_start_millis,
+        surface_pressure,
         dive_control_data_block,
         ms5849_i2c,
         &gases,
@@ -429,6 +497,7 @@ fn dive_start_and_loop<
     L: ExternalLogger,
 >(
     dive_start_millis: u32,
+    surface_pressure: Pa,
     dive_control_data_block: LogDiveControlDataBlock<NUM_GASES>,
     ms5849_i2c: &mut MS5849<'_, I, (), LFn>,
     gases: &[GasMix<f32>; NUM_GASES],
@@ -452,16 +521,18 @@ fn dive_start_and_loop<
         log_bytes(&logger, e.details().as_bytes());
     }
     let mut last_measurement_millis = dive_start_millis;
-    let mut last_logged_data = dive_start_millis;
+    let mut last_logged_millis = dive_start_millis;
     let mut last_logged_pressure = Pa::new(dive_control_data_block.surface_pressure as f32);
 
-    let mut flash_log_algorithm = DynamicDiffAimdRateAlgorithm::new(
+    let mut flash_log_algorithm = DynamicDiffAimdRateAlgorithm::new::<3, 4>(
         5000,
         20000,
         Bar::new(0.2).to_pa(),
         Bar::new(1.0).to_pa(),
         Bar::new(0.2).to_pa(),
     );
+
+    let mut max_depth = surface_pressure;
 
     loop {
         let current_millis = millis_tim2_since(dive_start_millis);
@@ -473,50 +544,18 @@ fn dive_start_and_loop<
         ms5849_i2c.read_i2c();
         match ms5849_i2c.depth_or_altitude() {
             Ok(DepthOrAltitude::Depth { pressure, depth }) => {
-                rprintln!("Measuring Pressure: {:?}, depth: {:?}", pressure, depth);
-                display_set_depth(depth);
-                let measurement = DiveMeasurement {
-                    time_ms: measurement_millis as usize,
-                    depth: pressure,
-                    gas: current_gas_mode_idx.to_log_byte() as usize,
-                };
-                let time_delta = measurement_millis - last_measurement_millis;
-                last_measurement_millis = measurement_millis;
-
-                // TODO: Add Measurement to Dive Profile
-                // TODO: Update loading
-                let next_log_time_delta =
-                    flash_log_algorithm.next_iter(last_logged_pressure, pressure);
-                let next_iter_due_in = next_log_time_delta.map(|n| last_logged_data + n);
-                match next_iter_due_in {
-                    Ok(next_iter) => {
-                        if measurement_millis > next_iter {
-                            // TODO:
-                            let deco_obligation = false;
-                            let level_state = LevelState::Error;
-                            let ascent_rate = 0;
-                            let temperature = 0;
-                            let battery = 0;
-                            let log_point_meta = LogPointMetadata::new(
-                                true,
-                                deco_obligation,
-                                level_state,
-                                [false; 4],
-                            );
-                            let log_point_data = LogPointData::new(
-                                log_point_meta,
-                                &measurement,
-                                ascent_rate,
-                                temperature,
-                                battery,
-                            );
-                            last_logged_data = measurement_millis;
-                        }
-                    }
-                    Err(e) => {
-                        rprintln!("Failed getting next log time: {:?}", e);
-                    }
-                }
+                handle_depth_measurement(
+                    &mut flash_log_algorithm,
+                    flash,
+                    pressure,
+                    depth,
+                    &mut last_measurement_millis,
+                    measurement_millis,
+                    &mut last_logged_millis,
+                    &mut last_logged_pressure,
+                    &mut max_depth,
+                    &current_gas_mode_idx,
+                );
             }
             Ok(DepthOrAltitude::Altitude { pressure, altitude }) => {
                 rprintln!(
@@ -539,6 +578,73 @@ fn dive_start_and_loop<
             Err(err) => rprintln!("Got error while calculating deco schedule: {:?}.", err),
         }
         display_refresh();
+    }
+}
+
+fn handle_depth_measurement<R: RateAlgorithm<Pa, Pa, u32>, F: Flash>(
+    flash_log_algorithm: &mut R,
+    flash: &mut F,
+    pressure: Pa,
+    depth: msw,
+    last_measurement_millis: &mut u32,
+    measurement_millis: u32,
+    last_logged_millis: &mut u32,
+    last_logged_pressure: &mut Pa,
+    max_depth: &mut Pa,
+    current_gas_mode_idx: &CurrentDiveModeWithInfo,
+) {
+    rprintln!("Measuring Pressure: {:?}, depth: {:?}", pressure, depth);
+    display_set_depth(depth);
+    let measurement = DiveMeasurement {
+        time_ms: measurement_millis as usize,
+        depth: pressure,
+        gas: current_gas_mode_idx.to_log_byte() as usize,
+    };
+    let time_delta = measurement_millis - *last_measurement_millis;
+    *last_measurement_millis = measurement_millis;
+
+    if *max_depth < pressure {
+        *max_depth = pressure;
+    }
+
+    // TODO: Add Measurement to Dive Profile
+    todo!("Add Measurement: {:?}", measurement);
+
+    // TODO: Update loading
+    todo!("Update Loading with Time Delta: {}", time_delta);
+
+    let next_log_time_delta = flash_log_algorithm.next_iter(*last_logged_pressure, pressure);
+    let next_iter_due_in = next_log_time_delta.map(|n| *last_logged_millis + n);
+    match next_iter_due_in {
+        Ok(next_iter) => {
+            if measurement_millis > next_iter {
+                // TODO:
+                let deco_obligation = false;
+                let level_state = LevelState::Error;
+                let ascent_rate = 0;
+                let temperature = 0;
+                let battery = 0;
+                let log_point_data = LogPointData::new(
+                    LogPointMetadata::new(true, deco_obligation, level_state, [false; 4]),
+                    &measurement,
+                    ascent_rate,
+                    temperature,
+                    battery,
+                );
+                match log_point_data.write(flash) {
+                    Ok(_) => {
+                        *last_logged_millis = measurement_millis;
+                        *last_logged_pressure = pressure;
+                    }
+                    Err(e) => {
+                        rprintln!("Failed writing log point data to flash: {:?}", e);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            rprintln!("Failed getting next log time: {:?}", e);
+        }
     }
 }
 

@@ -316,6 +316,10 @@ impl<'a, I, P, L: Fn(&[u8]) -> ()> MS5849<'a, I, P, L> {
         self.pressure().map(|pa: Pa| pa.to_bar())
     }
 
+    pub fn measure_pressure_to_pa(&self) -> Option<Pa> {
+        self.pressure()
+    }
+
     fn wait_ms(&self, ms: u8) {
         wait_ms(&self.delay, ms);
     }

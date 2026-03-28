@@ -1,7 +1,6 @@
-use core::{
-    num::NonZeroU32,
-    ops::{Add, Div, Mul, Sub},
-};
+use core::{marker::PhantomData, num::NonZeroU32};
+
+use thalmann::pressure_unit::{Pa, Pressure};
 
 const NON_ZERO_2: NonZeroU32 = NonZeroU32::new(2).unwrap();
 
@@ -27,22 +26,46 @@ impl<P, I> RateAlgorithm<P, I, u32> for FixedRateAlgorithm {
     }
 }
 
-pub trait AimdUnit:
-    Add<Output = Self>
-    + Sub<Output = Self>
-    + Mul<u32, Output = Self>
-    + Div<NonZeroU32, Output = Self>
-    + Ord
-    + Copy
-{
+pub trait AimdUnit: PartialOrd + Copy {
+    fn to_u32(self) -> u32;
+    fn from_u32(value: u32) -> Self;
 }
 
-impl AimdUnit for u32 {}
+impl AimdUnit for u32 {
+    fn to_u32(self) -> u32 {
+        self
+    }
+
+    fn from_u32(value: u32) -> Self {
+        value
+    }
+}
+
+impl AimdUnit for f32 {
+    fn to_u32(self) -> u32 {
+        self as u32
+    }
+
+    fn from_u32(value: u32) -> Self {
+        value as f32
+    }
+}
+
+impl AimdUnit for Pa {
+    fn to_u32(self) -> u32 {
+        self.to_f32() as u32
+    }
+
+    fn from_u32(value: u32) -> Self {
+        Pa::new(value as f32)
+    }
+}
 
 pub struct AimdRateAlgorithm<Unit: AimdUnit> {
-    current: Unit,
-    max: Unit,
-    ai_millis: Unit,
+    marker: PhantomData<Unit>,
+    current: u32,
+    max: u32,
+    ai_millis: u32,
     md: NonZeroU32,
 }
 
@@ -53,8 +76,12 @@ impl<Unit: AimdUnit> AimdRateAlgorithm<Unit> {
         ai_millis: Unit,
         md_multiplicator: NonZeroU32,
     ) -> AimdRateAlgorithm<Unit> {
+        let initial = initial.to_u32();
+        let max = max.to_u32();
+        let ai_millis = ai_millis.to_u32();
         AimdRateAlgorithm {
-            current: initial.min(max),
+            marker: PhantomData,
+            current: if initial <= max { initial } else { max },
             max,
             ai_millis,
             md: md_multiplicator,
@@ -70,14 +97,17 @@ impl<Unit: AimdUnit, P> RateAlgorithm<P, bool, Unit> for AimdRateAlgorithm<Unit>
         } else {
             self.current = self.current + self.ai_millis
         }
-        self.current = self.current.min(self.max);
-        Ok(self.current)
+        if self.current > self.max {
+            self.current = self.max;
+        }
+        Ok(Unit::from_u32(self.current))
     }
 }
 
 pub struct DiffAimdRateAlgorithm<ResultUnit: AimdUnit, Unit: AimdUnit> {
     base_algorithm: AimdRateAlgorithm<ResultUnit>,
-    min_change_diff: Unit,
+    min_change_diff: u32,
+    marker: PhantomData<Unit>,
 }
 
 impl<ResultUnit: AimdUnit, Unit: AimdUnit> DiffAimdRateAlgorithm<ResultUnit, Unit> {
@@ -88,7 +118,8 @@ impl<ResultUnit: AimdUnit, Unit: AimdUnit> DiffAimdRateAlgorithm<ResultUnit, Uni
     ) -> DiffAimdRateAlgorithm<ResultUnit, Unit> {
         DiffAimdRateAlgorithm {
             base_algorithm: AimdRateAlgorithm::new(initial, max, initial, NON_ZERO_2),
-            min_change_diff,
+            min_change_diff: min_change_diff.to_u32(),
+            marker: PhantomData,
         }
     }
 }
@@ -98,6 +129,8 @@ impl<ResultUnit: AimdUnit, Unit: AimdUnit> RateAlgorithm<Unit, Unit, ResultUnit>
 {
     type Error = ();
     fn next_iter(&mut self, prev: Unit, instance: Unit) -> Result<ResultUnit, Self::Error> {
+        let prev = prev.to_u32();
+        let instance = instance.to_u32();
         let diff = if prev > instance {
             prev - instance
         } else {
@@ -137,7 +170,7 @@ impl<Unit: AimdUnit> RateAlgorithm<Unit, Unit, u32> for DynamicDiffAimdRateAlgor
     fn next_iter(&mut self, prev: Unit, instance: Unit) -> Result<u32, Self::Error> {
         let diff_res = self.diff_algorithm.next_iter(prev, instance);
         if let Ok(diff) = diff_res {
-            self.base_algorithm.min_change_diff = diff;
+            self.base_algorithm.min_change_diff = diff.to_u32();
         }
         self.base_algorithm.next_iter(prev, instance)
     }

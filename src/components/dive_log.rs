@@ -1,4 +1,9 @@
-use thalmann::gas::GasMix;
+use fixed::{FixedU16, traits::Fixed, types::U10F6};
+use thalmann::{
+    dive::DiveMeasurement,
+    gas::GasMix,
+    pressure_unit::{Pa, Pressure},
+};
 
 use crate::components::flash::Flash;
 
@@ -34,6 +39,29 @@ impl Salinity {
 pub enum DiveMode {
     OC,
     CC,
+}
+
+pub enum CurrentDiveModeWithInfo {
+    OC {
+        gas_idx: usize,
+    },
+    CC {
+        partial_pressure: Pa,
+        dil_idx: usize,
+    },
+}
+
+impl CurrentDiveModeWithInfo {
+    pub fn to_log_byte(&self) -> u8 {
+        const MSB_U8: u8 = 1 << 7;
+        match self {
+            Self::OC { gas_idx } => *gas_idx as u8 & !MSB_U8,
+            Self::CC {
+                partial_pressure,
+                dil_idx,
+            } => MSB_U8 | (*dil_idx as u8) & !MSB_U8,
+        }
+    }
 }
 
 #[repr(u8)]
@@ -114,6 +142,22 @@ where
             gas_nr: GAS_NR as u8,
             gas_content: get_gas_content(gas_content),
         }
+    }
+
+    pub fn surface_temperature_celsius(&self) -> f32 {
+        self.surface_temperature as f32 / 2.0
+    }
+
+    pub fn gas_content(&self) -> [GasMix<f32>; GAS_NR] {
+        core::array::from_fn(|i| {
+            let base = i * 3;
+            let o2 = self.gas_content[base] as f32;
+            let he = self.gas_content[base + 2] as f32;
+            match GasMix::new(o2, he) {
+                Ok(gas) => gas,
+                Err(_) => GasMix::new(0.0, 0.0).unwrap(),
+            }
+        })
     }
 
     pub fn write<F: Flash>(&self, flash: &mut F) -> Result<u32, F::Error>
@@ -238,7 +282,7 @@ impl LogPointMetadata {
 
 pub struct BasicLogPointData {
     time_delta: u16,
-    depth: u16,
+    depth_m: U10F6,
     metadata: LogPointMetadata,
     battery: u8,
     temperature: i8,
@@ -262,6 +306,27 @@ pub struct LogPointData {
 }
 
 impl LogPointData {
+    pub fn new(
+        metadata: LogPointMetadata,
+        value: &DiveMeasurement,
+        ascent_rate: u8,
+        temperature: i8,
+        battery: u8,
+    ) -> Self {
+        let basic_data = BasicLogPointData {
+            time_delta: (value.time_ms / 1000) as u16,
+            depth_m: U10F6::from_num(value.depth.to_msw().to_f32()),
+            metadata,
+            battery,
+            temperature,
+            ascent_rate,
+        };
+        Self {
+            basic_data,
+            deco_data: None,
+        }
+    }
+
     pub fn write<F: Flash>(&self, flash: &mut F) -> Result<(u32, Option<u32>), F::Error> {
         // Make sure metadata optional pages are always valid
         let metadata =
@@ -270,8 +335,8 @@ impl LogPointData {
         let basic_page: [u8; 8] = [
             (self.basic_data.time_delta >> 8 & 0xFF) as u8,
             (self.basic_data.time_delta & 0xFF) as u8,
-            (self.basic_data.depth >> 8 & 0xFF) as u8,
-            (self.basic_data.depth & 0xFF) as u8,
+            (self.basic_data.depth_m.to_bits() >> 8 & 0xFF) as u8,
+            (self.basic_data.depth_m.to_bits() & 0xFF) as u8,
             metadata,
             self.basic_data.battery,
             self.basic_data.temperature as u8,

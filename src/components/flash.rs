@@ -3,6 +3,8 @@ use stm32l4xx_hal::hal::{
     digital::v2::OutputPin,
 };
 
+use crate::components::spi_utils::DetailsError;
+
 use super::spi_utils::SpiError;
 
 pub const PAGE_SIZE: u32 = 256;
@@ -16,7 +18,7 @@ const ERASE_32K_INSTRUCTION: u8 = 0x52;
 const ERASE_4K_INSTRUCTION: u8 = 0x20;
 
 pub trait Flash {
-    type Error: core::error::Error;
+    type Error: core::error::Error + DetailsError;
 
     fn set_pos(&mut self, new_pos: u32) -> Result<u32, Self::Error>;
 

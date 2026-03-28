@@ -1,5 +1,9 @@
 use core::fmt::{Display, Formatter};
 
+pub trait DetailsError {
+    fn details(&self) -> &'static str;
+}
+
 #[derive(Debug)]
 pub struct SpiError {
     pub priority: u8,
@@ -9,6 +13,12 @@ pub struct SpiError {
 impl SpiError {
     pub fn new(priority: u8, details: &'static str) -> SpiError {
         SpiError { priority, details }
+    }
+}
+
+impl DetailsError for SpiError {
+    fn details(&self) -> &'static str {
+        self.details
     }
 }
 

@@ -55,7 +55,7 @@ impl SensorConfiguration {
 
 #[allow(non_camel_case_types)]
 #[allow(non_snake_case)]
-pub struct MS5849<'a, INTERFACE, P, L: Fn(&[u8]) -> ()> {
+pub struct MS5849<'a, INTERFACE, P> {
     interface: INTERFACE,
     config: SensorConfiguration,
     cs: Option<P>,
@@ -65,7 +65,6 @@ pub struct MS5849<'a, INTERFACE, P, L: Fn(&[u8]) -> ()> {
     D2_temp: Option<u32>,
     C: [u16; 10],
     delay: &'a Mutex<RefCell<Delay>>,
-    log_bytes: L,
 }
 
 fn scan_i2c<I: Write, L: Fn(&[u8]) -> ()>(i2c: &mut I, log_bytes: L)
@@ -124,20 +123,21 @@ fn wait_ms(delay: &Mutex<RefCell<Delay>>, ms: u8) {
     free(|cs| delay.borrow(cs).borrow_mut().delay_ms(ms)); // Max conversion time per datasheet
 }
 
-impl<'a, SPI, P, L: Fn(&[u8]) -> ()> MS5849<'a, SPI, P, L>
+impl<'a, SPI, P> MS5849<'a, SPI, P>
 where
     SPI: spi::Transfer<u8> + spi::Write<u8>,
     P: OutputPin,
 {
-    pub fn new_spi(
+    pub fn new_spi<L: Fn(&[u8]) -> ()>(
         mut spi: SPI,
         mut cs: P,
         delay: &'a Mutex<RefCell<Delay>>,
         log_bytes: L,
-    ) -> MS5849<'a, SPI, P, L> {
+    ) -> MS5849<'a, SPI, P> {
         let mut cal: [u16; 10] = [0; 10];
 
         rprintln!("Created SPI Interface");
+        log_bytes(b"Created SPI Interface");
 
         // let mut cs_pins = [&mut cs];
         // scan_spi(&mut spi, &mut cs_pins, 0xA0);
@@ -189,7 +189,6 @@ where
             D2_temp: None,
             C: cal,
             delay,
-            log_bytes,
         }
     }
 
@@ -224,17 +223,17 @@ where
     }
 }
 
-impl<'a, I: Write + Read + WriteRead, L: Fn(&[u8]) -> ()> MS5849<'a, I, (), L>
+impl<'a, I: Write + Read + WriteRead> MS5849<'a, I, ()>
 where
     <I as Read>::Error: Debug,
     <I as Write>::Error: Debug,
     <I as WriteRead>::Error: Debug,
 {
-    pub fn new_i2c(
+    pub fn new_i2c<L: Fn(&[u8]) -> ()>(
         mut i2c: I,
         delay: &'a Mutex<RefCell<Delay>>,
         log_bytes: L,
-    ) -> MS5849<'a, I, (), L> {
+    ) -> MS5849<'a, I, ()> {
         let mut cal: [u16; 10] = [0; 10];
 
         rprintln!("Created I2C Interface");
@@ -282,7 +281,6 @@ where
             D2_temp: None,
             C: cal,
             delay,
-            log_bytes,
         }
     }
 
@@ -313,7 +311,7 @@ where
     }
 }
 
-impl<'a, I, P, L: Fn(&[u8]) -> ()> MS5849<'a, I, P, L> {
+impl<'a, I, P> MS5849<'a, I, P> {
     pub fn measure_pressure_to_bar(&self) -> Option<Bar> {
         self.pressure().map(|pa: Pa| pa.to_bar())
     }

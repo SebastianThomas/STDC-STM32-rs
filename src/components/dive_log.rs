@@ -1,4 +1,4 @@
-use fixed::{FixedU16, traits::Fixed, types::U10F6};
+use fixed::types::U10F6;
 use thalmann::{
     dive::DiveMeasurement,
     gas::{CCRGas, GasMix},
@@ -56,10 +56,7 @@ impl CurrentDiveModeWithInfo {
         const MSB_U8: u8 = 1 << 7;
         match self {
             Self::OC { gas_idx } => *gas_idx as u8 & !MSB_U8,
-            Self::CC {
-                partial_pressure,
-                dil_idx,
-            } => MSB_U8 | (*dil_idx as u8) & !MSB_U8,
+            Self::CC { dil_idx, .. } => MSB_U8 | (*dil_idx as u8) & !MSB_U8,
         }
     }
 

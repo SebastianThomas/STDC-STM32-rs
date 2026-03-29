@@ -342,7 +342,7 @@ fn main() -> ! {
     rprintln!("Starting main waiting loop");
     loop {
         let (surface_pressure, first_dive_pressure) =
-            surface_interval_wait(&mut ms5849_i2c, &mut flash, &delay, &rtc, &logger);
+            surface_interval_wait(&mut ms5849_i2c, &mut flash, &delay, &logger);
         start_log_dive(
             &mut ms5849_i2c,
             &mut flash,
@@ -353,16 +353,10 @@ fn main() -> ! {
     }
 }
 
-fn surface_interval_wait<
-    I: Write + Read + WriteRead,
-    LFn: Fn(&[u8]) -> (),
-    F: Flash,
-    L: ExternalLogger,
->(
-    ms5849_i2c: &mut MS5849<'_, I, (), LFn>,
+fn surface_interval_wait<I: Write + Read + WriteRead, F: Flash, L: ExternalLogger>(
+    ms5849_i2c: &mut MS5849<'_, I, ()>,
     flash: &mut F,
     delay: &Mutex<RefCell<Delay>>,
-    rtc: &Rtc,
     logger: &Mutex<RefCell<L>>,
 ) -> (Pa, Pa)
 where
@@ -439,8 +433,8 @@ where
     }
 }
 
-fn start_log_dive<I: Write + Read + WriteRead, LFn: Fn(&[u8]) -> (), F: Flash, L: ExternalLogger>(
-    ms5849_i2c: &mut MS5849<'_, I, (), LFn>,
+fn start_log_dive<I: Write + Read + WriteRead, F: Flash, L: ExternalLogger>(
+    ms5849_i2c: &mut MS5849<'_, I, ()>,
     flash: &mut F,
     rtc: &Rtc,
     logger: &Mutex<RefCell<L>>,
@@ -511,14 +505,13 @@ fn start_log_dive<I: Write + Read + WriteRead, LFn: Fn(&[u8]) -> (), F: Flash, L
 fn dive_start_and_loop<
     const NUM_GASES: usize,
     I: Write + Read + WriteRead,
-    LFn: Fn(&[u8]) -> (),
     F: Flash,
     L: ExternalLogger,
 >(
     dive_start_millis: u32,
     surface_pressure: Pa,
     dive_control_data_block: LogDiveControlDataBlock<NUM_GASES>,
-    ms5849_i2c: &mut MS5849<'_, I, (), LFn>,
+    ms5849_i2c: &mut MS5849<'_, I, ()>,
     deco_settings: &DecoSettings<Pa>,
     gases: &[GasMix<f32>; NUM_GASES],
     loading: &mut TissuesLoading<NUM_TISSUES, Pa>,

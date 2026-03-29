@@ -2,8 +2,12 @@
 #![no_std]
 #![feature(const_trait_impl)]
 #![feature(const_default)]
+#![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 
+use core::fmt::Write as _;
+
+use heapless::String;
 use panic_probe as _;
 
 use core::{
@@ -50,6 +54,7 @@ use stdc_stm32_rs::{
     barometric::DepthOrAltitude,
     components::{
         MS5849,
+        battery_status::{BatterySnapshot, BatteryStatusError, BatteryStatusI2C, Max17262Variant},
         bluetooth::UartBluetoothModule,
         display::{DisplayState, MAX_STOP_NUMS, SpiDisplay},
         dive_log::{
@@ -293,12 +298,53 @@ fn main() -> ! {
         gpioc
             .pc1
             .into_alternate_open_drain(&mut gpioc.moder, &mut gpioc.otyper, &mut gpioc.afrl);
-    let battery_status_i2c = I2c::i2c3(
-        dp.I2C3,
-        (scl, sda),
-        i2c::Config::new(100.kHz(), clocks),
-        &mut apb1r1,
+    let mut battery_status = BatteryStatusI2C::new(
+        I2c::i2c3(
+            dp.I2C3,
+            (scl, sda),
+            i2c::Config::new(100.kHz(), clocks),
+            &mut apb1r1,
+        ),
+        &delay,
+        Max17262Variant::R,
     );
+    match battery_status.read_snapshot() {
+        Ok(BatterySnapshot {
+            state_of_charge_percent,
+            voltage_mv,
+            current_ma,
+            temperature_c,
+            remaining_capacity_mah,
+            full_capacity_mah,
+        }) => {
+            log_bytes(&logger, b"Got battery status information");
+            let mut msg: String<192> = String::new();
+            let _ = write!(
+                &mut msg,
+                "Battery: soc={:.2}% v={}mV i={:.3}mA t={:.2}C rem={:.2}mAh full={:.2}mAh",
+                state_of_charge_percent,
+                voltage_mv,
+                current_ma,
+                temperature_c,
+                remaining_capacity_mah,
+                full_capacity_mah
+            );
+            log_bytes(&logger, msg.as_bytes());
+        }
+        Err(e) => {
+            log_bytes(
+                &logger,
+                match e {
+                    BatteryStatusError::I2cWrite => {
+                        b"Failed reading battery status with error: I2C Write failed"
+                    }
+                    BatteryStatusError::I2cWriteRead => {
+                        b"Failed reading battery status with error: I2C Write Read failed"
+                    }
+                },
+            );
+        }
+    };
 
     // Bluetooth UART
     let bluetooth_tx_ind = gpiob

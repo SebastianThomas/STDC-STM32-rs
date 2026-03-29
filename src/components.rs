@@ -1,3 +1,4 @@
+pub mod battery_status;
 pub mod bluetooth;
 pub mod display;
 pub mod dive_log;

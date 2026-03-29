@@ -1,7 +1,7 @@
 #![no_std]
 #![feature(const_trait_impl)]
-// #![feature(const_ops)]
 #![feature(const_default)]
+#![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 
 #[cfg(all(test, not(target_os = "none")))]

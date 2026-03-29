@@ -57,4 +57,5 @@ impl DisplayState {
 pub trait LedDisplay {
     type Error: DetailsError;
     fn show_splashscreen(&mut self, text: &[u8]) -> Result<(), Self::Error>;
+    fn refresh_with_state(&mut self, state: &DisplayState) -> Result<(), Self::Error>;
 }

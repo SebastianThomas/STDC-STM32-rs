@@ -5,6 +5,8 @@ use stm32l4xx_hal::{
 
 use crate::components::spi_utils::SpiError;
 
+const STATUS_CACHE_LEN: usize = 16;
+
 pub struct SpiDisplay<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> {
     power_enable: EN,
     spi: Spi<SPI, PINS>,
@@ -12,6 +14,10 @@ pub struct SpiDisplay<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> 
     not_data_command: NDC,
 
     enabled: bool,
+    depth_cache: [u8; STATUS_CACHE_LEN],
+    depth_cache_len: usize,
+    time_cache: [u8; STATUS_CACHE_LEN],
+    time_cache_len: usize,
 }
 
 impl<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> SpiDisplay<SPI, PINS, EN, RST, NDC> {
@@ -27,6 +33,10 @@ impl<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> SpiDisplay<SPI, P
             spi_reset,
             not_data_command,
             enabled: false,
+            depth_cache: [0; STATUS_CACHE_LEN],
+            depth_cache_len: 0,
+            time_cache: [0; STATUS_CACHE_LEN],
+            time_cache_len: 0,
         }
     }
 
@@ -91,6 +101,31 @@ impl<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> SpiDisplay<SPI, P
         self.not_data_command
             .set_high()
             .map_err(|_| SpiError::new(1, "Failed setting display D/C to data mode"))
+    }
+
+    pub(crate) fn update_depth_cache(&mut self, value: &[u8]) -> bool {
+        self.update_cache(true, value)
+    }
+
+    pub(crate) fn update_time_cache(&mut self, value: &[u8]) -> bool {
+        self.update_cache(false, value)
+    }
+
+    fn update_cache(&mut self, is_depth: bool, value: &[u8]) -> bool {
+        let len = core::cmp::min(value.len(), STATUS_CACHE_LEN);
+        let (cache, cache_len) = if is_depth {
+            (&mut self.depth_cache, &mut self.depth_cache_len)
+        } else {
+            (&mut self.time_cache, &mut self.time_cache_len)
+        };
+
+        if *cache_len == len && cache[..len] == value[..len] {
+            return false;
+        }
+
+        cache[..len].copy_from_slice(&value[..len]);
+        *cache_len = len;
+        true
     }
 }
 

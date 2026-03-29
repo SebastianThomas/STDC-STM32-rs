@@ -10,11 +10,7 @@ use core::fmt::Write as _;
 use heapless::String;
 use panic_probe as _;
 
-use core::{
-    cell::{Ref, RefCell},
-    fmt::Debug,
-    time::Duration,
-};
+use core::{cell::RefCell, fmt::Debug, time::Duration};
 
 use cortex_m::interrupt::{Mutex, free};
 use cortex_m_rt::entry;
@@ -37,7 +33,6 @@ use stm32l4xx_hal::{
 
 use thalmann::{
     calc_deco_schedule,
-    display_utils::{format_f32, show_duration},
     dive::{DiveMeasurement, DiveProfile, StopSchedule},
     gas::{GasMix, MAX_GAS_DENSITY, TissuesLoading},
     loadings_from_dive_profile,
@@ -403,6 +398,7 @@ fn main() -> ! {
         let (surface_pressure, first_dive_pressure) =
             surface_interval_wait(&mut ms5849_i2c, &mut flash, &delay, &logger);
         start_log_dive(
+            &mut display,
             &mut ms5849_i2c,
             &mut flash,
             &rtc,
@@ -492,7 +488,8 @@ where
     }
 }
 
-fn start_log_dive<I: Write + Read + WriteRead, F: Flash, L: ExternalLogger>(
+fn start_log_dive<D: LedDisplay, I: Write + Read + WriteRead, F: Flash, L: ExternalLogger>(
+    display: &mut D,
     ms5849_i2c: &mut MS5849<'_, I, ()>,
     flash: &mut F,
     rtc: &Rtc,
@@ -551,6 +548,7 @@ fn start_log_dive<I: Write + Read + WriteRead, F: Flash, L: ExternalLogger>(
         dive_start_millis,
         surface_pressure,
         dive_control_data_block,
+        display,
         ms5849_i2c,
         &deco_settings,
         &gases,
@@ -562,6 +560,7 @@ fn start_log_dive<I: Write + Read + WriteRead, F: Flash, L: ExternalLogger>(
 }
 
 fn dive_start_and_loop<
+    D: LedDisplay,
     const NUM_GASES: usize,
     I: Write + Read + WriteRead,
     F: Flash,
@@ -570,6 +569,7 @@ fn dive_start_and_loop<
     dive_start_millis: u32,
     surface_pressure: Pa,
     dive_control_data_block: LogDiveControlDataBlock<NUM_GASES>,
+    display: &mut D,
     ms5849_i2c: &mut MS5849<'_, I, ()>,
     deco_settings: &DecoSettings<Pa>,
     gases: &[GasMix<f32>; NUM_GASES],
@@ -651,7 +651,13 @@ fn dive_start_and_loop<
             Ok(stops) => display_set_stop_schedule(stops),
             Err(err) => rprintln!("Got error while calculating deco schedule: {:?}.", err),
         }
-        display_refresh();
+        match display_refresh(display) {
+            Ok(_) => {}
+            Err(e) => {
+                log_bytes(&logger, b"Failed refreshing display.");
+                log_bytes(&logger, e.details().as_bytes());
+            }
+        };
     }
 }
 
@@ -746,16 +752,11 @@ fn display_set_stop_schedule(stops: StopSchedule<MAX_STOP_NUMS>) {
     });
 }
 
-fn display_refresh() {
+fn display_refresh<D: LedDisplay>(display: &mut D) -> Result<(), D::Error> {
     free(|cs| {
         let display_state = DISPLAY_STATE.borrow(cs).borrow();
-        display_refresh_with_state(display_state);
-    });
-}
-
-fn display_refresh_with_state(display_state: Ref<DisplayState>) {
-    let _duration_chars = show_duration(display_state.dive_time);
-    let _meters_chars = format_f32::<' ', 3, 1>(display_state.depth.to_f32());
+        display.refresh_with_state(&display_state)
+    })
 }
 
 fn log_bytes<L: ExternalLogger>(logger: &Mutex<RefCell<L>>, bytes: &[u8]) {

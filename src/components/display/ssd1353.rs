@@ -2,9 +2,12 @@ use stm32l4xx_hal::{
     hal::{blocking::spi::Write, digital::v2::OutputPin},
     spi::Spi,
 };
+use thalmann::pressure_unit::{Pressure, msw};
+
+use core::time::Duration;
 
 use crate::components::{
-    display::{LedDisplay, spi::SpiDisplay},
+    display::{DisplayState, LedDisplay, spi::SpiDisplay},
     spi_utils::SpiError,
 };
 
@@ -39,6 +42,89 @@ const FONT_HEIGHT: u8 = 7;
 const FONT_SPACING: u8 = 1;
 
 const DISPLAY_TITLE: &[u8] = b"STDC";
+
+const STATUS_SCALE: u8 = 2;
+const STATUS_Y: u8 = 2;
+const STATUS_AREA_HEIGHT: u8 = FONT_HEIGHT * STATUS_SCALE + 4;
+const STATUS_PADDING: u8 = 2;
+const STATUS_LEFT_X: u8 = 0;
+const STATUS_LEFT_W: u8 = SSD1353_WIDTH / 2;
+const STATUS_RIGHT_X: u8 = SSD1353_WIDTH / 2;
+const STATUS_RIGHT_W: u8 = SSD1353_WIDTH - STATUS_RIGHT_X;
+
+fn append_u32_ascii(mut value: u32, out: &mut [u8], offset: &mut usize) {
+    if *offset >= out.len() {
+        return;
+    }
+
+    if value == 0 {
+        out[*offset] = b'0';
+        *offset += 1;
+        return;
+    }
+
+    let mut digits = [0u8; 10];
+    let mut pos = 0;
+    while value > 0 && pos < digits.len() {
+        digits[pos] = (value % 10) as u8;
+        value /= 10;
+        pos += 1;
+    }
+
+    while pos > 0 && *offset < out.len() {
+        pos -= 1;
+        out[*offset] = b'0' + digits[pos];
+        *offset += 1;
+    }
+}
+
+fn format_depth_text(depth: msw, out: &mut [u8; 16]) -> usize {
+    let mut val = depth.to_f32();
+    if !val.is_finite() || val < 0.0 {
+        val = 0.0;
+    }
+
+    let tenths = (val * 10.0 + 0.5) as u32;
+    let whole = tenths / 10;
+    let frac = tenths % 10;
+
+    let mut len = 0;
+    append_u32_ascii(whole, out, &mut len);
+    if len < out.len() {
+        out[len] = b'.';
+        len += 1;
+    }
+    if len < out.len() {
+        out[len] = b'0' + frac as u8;
+        len += 1;
+    }
+    if len < out.len() {
+        out[len] = b'm';
+        len += 1;
+    }
+
+    len
+}
+
+fn format_dive_time_text(dive_time: Duration, out: &mut [u8; 16]) -> usize {
+    let secs = dive_time.as_secs();
+    let mins = (secs / 60) as u32;
+    let rem_secs = (secs % 60) as u32;
+
+    let mut len = 0;
+    append_u32_ascii(mins, out, &mut len);
+    if len < out.len() {
+        out[len] = b':';
+        len += 1;
+    }
+    if len + 1 < out.len() {
+        out[len] = b'0' + (rem_secs / 10) as u8;
+        out[len + 1] = b'0' + (rem_secs % 10) as u8;
+        len += 2;
+    }
+
+    len
+}
 
 fn to_upper_ascii(byte: u8) -> u8 {
     if byte.is_ascii_lowercase() {
@@ -294,6 +380,94 @@ where
 
         Ok(())
     }
+
+    fn draw_scaled_text_at(
+        &mut self,
+        x: u8,
+        y: u8,
+        text: &[u8],
+        scale: u8,
+        color: u16,
+        max_width: u8,
+    ) -> Result<(), SpiError> {
+        if scale == 0 {
+            return Err(SpiError::new(0, "Text scale must be greater than zero"));
+        }
+        let char_advance = (FONT_WIDTH + FONT_SPACING) as u16 * scale as u16;
+        let max_chars = (max_width as u16 / char_advance) as usize;
+        let draw_len = text.len().min(max_chars);
+
+        for (idx, byte) in text.iter().take(draw_len).enumerate() {
+            let dx = x as u16 + idx as u16 * char_advance;
+            self.draw_scaled_char(dx as u8, y, *byte, scale, color)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn ssd1353_show_depth_and_dive_time(
+        &mut self,
+        state: &DisplayState,
+    ) -> Result<(), SpiError> {
+        let mut depth_label = [0u8; 16];
+        let mut time_label = [0u8; 16];
+        let depth_len = format_depth_text(state.depth, &mut depth_label);
+        let time_len = format_dive_time_text(state.dive_time, &mut time_label);
+
+        let depth_changed = self.update_depth_cache(&depth_label[..depth_len]);
+        let time_changed = self.update_time_cache(&time_label[..time_len]);
+
+        if depth_changed {
+            self.ssd1353_fill_rect(
+                STATUS_LEFT_X,
+                0,
+                STATUS_LEFT_W,
+                STATUS_AREA_HEIGHT,
+                COLOR_BLACK,
+            )?;
+            self.draw_scaled_text_at(
+                STATUS_LEFT_X + STATUS_PADDING,
+                STATUS_Y,
+                &depth_label[..depth_len],
+                STATUS_SCALE,
+                COLOR_SUBTITLE,
+                STATUS_LEFT_W - STATUS_PADDING * 2,
+            )?;
+        }
+
+        if time_changed {
+            self.ssd1353_fill_rect(
+                STATUS_RIGHT_X,
+                0,
+                STATUS_RIGHT_W,
+                STATUS_AREA_HEIGHT,
+                COLOR_BLACK,
+            )?;
+
+            let time_draw_len = time_len.min(
+                (STATUS_RIGHT_W as u16 / ((FONT_WIDTH + FONT_SPACING) as u16 * STATUS_SCALE as u16))
+                    as usize,
+            );
+            let time_width = measure_text_width(time_draw_len, STATUS_SCALE);
+            let max_x = STATUS_RIGHT_X as u16 + STATUS_RIGHT_W as u16 - STATUS_PADDING as u16;
+            let start_x = if time_width + STATUS_PADDING as u16 > STATUS_RIGHT_W as u16 {
+                STATUS_RIGHT_X
+            } else {
+                (max_x - time_width) as u8
+            };
+
+            self.draw_scaled_text_at(
+                start_x,
+                STATUS_Y,
+                &time_label[..time_len],
+                STATUS_SCALE,
+                COLOR_SUBTITLE,
+                STATUS_RIGHT_W - STATUS_PADDING * 2,
+            )?;
+        }
+
+        Ok(())
+    }
 }
 
 impl<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> LedDisplay
@@ -323,5 +497,9 @@ where
             COLOR_SUBTITLE,
         )?;
         Ok(())
+    }
+
+    fn refresh_with_state(&mut self, state: &DisplayState) -> Result<(), Self::Error> {
+        self.ssd1353_show_depth_and_dive_time(state)
     }
 }

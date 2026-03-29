@@ -3,7 +3,6 @@
 #![feature(const_trait_impl)]
 #![feature(const_default)]
 #![feature(generic_const_exprs)]
-#![feature(concat_bytes)]
 
 use panic_probe as _;
 

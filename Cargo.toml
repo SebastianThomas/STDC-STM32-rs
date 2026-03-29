@@ -2,12 +2,18 @@
 name = "stdc_stm32_rs"
 version = "0.1.0"
 edition = "2024"
+resolver = "2"
+
+[lib]
+name = "stdc_stm32_rs"
+path = "src/lib.rs"
+test = true
+doctest = false
 
 [dependencies]
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = { version = "0.7", features = ["device"] }
 # embedded-hal = "0.2"
-stm32l4xx-hal = { version = "0.7.1", features = ["rt", "stm32l486"] }
 rtt-target = { version = "0.6", features = ["defmt"] }
 panic-halt = "1.0"
 panic-probe = { version = "1.0" , features = ["print-rtt"] }
@@ -17,6 +23,9 @@ thalmann = { git = "https://github.com/SebastianThomas/STDC-thalmann.git", versi
 num = { version = "0.4.3", default-features = false, features = ["libm"] }
 nb = "1.1.0"
 fixed = "1.31.0"
+
+[target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
+stm32l4xx-hal = { version = "0.7.1", default-features = false, features = ["rt", "stm32l486"] }
 
 [[bin]]
 name = "stdc_stm32_rs"

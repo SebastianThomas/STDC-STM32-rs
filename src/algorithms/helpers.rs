@@ -1,5 +1,24 @@
-use num::Unsigned;
-use stm32l4xx_hal::datetime::{Date, Time};
+#[cfg(target_os = "none")]
+pub use stm32l4xx_hal::datetime::{Date, Time};
+
+#[cfg(not(target_os = "none"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Date {
+    pub day: u32,
+    pub date: u32,
+    pub month: u32,
+    pub year: u32,
+}
+
+#[cfg(not(target_os = "none"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Time {
+    pub hours: u32,
+    pub minutes: u32,
+    pub seconds: u32,
+    pub micros: u32,
+    pub daylight_savings: bool,
+}
 
 const fn is_leap_year(year: u32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
@@ -32,7 +51,6 @@ const fn days_in_month(year: u32, month: u32) -> u32 {
 const MIN_YEAR: u32 = 1970;
 const MAX_YEAR: u32 = 2035;
 const SECONDS_IN_DAY: u32 = 86400;
-
 const YEAR_COUNT: usize = (MAX_YEAR - MIN_YEAR + 1) as usize;
 
 const SECONDS_PER_YEAR: [u32; YEAR_COUNT] = {
@@ -50,17 +68,29 @@ const SECONDS_PER_YEAR: [u32; YEAR_COUNT] = {
     arr
 };
 
+const SECONDS_AT_YEAR_START: [u32; YEAR_COUNT] = {
+    let mut arr = [0; YEAR_COUNT];
+    let mut i = 1;
+    while i < YEAR_COUNT {
+        arr[i] = arr[i - 1] + SECONDS_PER_YEAR[i - 1];
+        i += 1;
+    }
+    arr
+};
+
 pub fn datetime_to_epoch_seconds(date: Date, time: Time) -> u32 {
     if date.year < MIN_YEAR || date.year > MAX_YEAR {
         panic!("Year out of bounds, this should not be reachable")
     }
-    let mut days = SECONDS_PER_YEAR[date.year as usize - 1970];
+
+    let mut seconds = SECONDS_AT_YEAR_START[(date.year - MIN_YEAR) as usize];
+
     for m in 1..date.month as u32 {
-        days += days_in_month(date.year, m);
+        seconds += days_in_month(date.year, m) * SECONDS_IN_DAY;
     }
 
-    days += (date.day as u32) - 1;
-    let seconds = days * 86400 + time.hours * 3600 + time.minutes * 60 + time.seconds;
+    seconds += ((date.date as u32) - 1) * SECONDS_IN_DAY;
+    seconds += time.hours * 3600 + time.minutes * 60 + time.seconds;
 
     seconds
 }

@@ -8,3 +8,6 @@ rustflags = [
 
 [build]
 target = "thumbv7em-none-eabihf"
+
+[alias]
+t = "test --target x86_64-apple-darwin --lib"

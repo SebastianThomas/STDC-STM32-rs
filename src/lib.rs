@@ -7,4 +7,5 @@
 pub mod algorithms;
 pub mod barometric;
 pub mod components;
+pub mod macros;
 pub mod spi;

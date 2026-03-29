@@ -73,6 +73,7 @@ where
     <I as cortex_m::prelude::_embedded_hal_blocking_i2c_Write>::Error: Debug,
 {
     rprintln!("Scanning I2C bus...");
+    log_bytes(b"Scanning I2C bus...");
 
     for addr in 0x03u8..0x78u8 {
         // valid 7-bit I2C addresses
@@ -80,7 +81,7 @@ where
         let result = i2c.write(addr, &[]);
         match result {
             Ok(_) => {
-                log_bytes("I2C device found at 0x".as_bytes());
+                log_bytes(b"I2C device found at 0x");
                 log_bytes(&[addr, '\n' as u8]);
                 rprintln!("I2C device found at 0x{:02X}", addr);
             }
@@ -244,6 +245,7 @@ where
         // Reset the MS5837, per datasheet
         write_i2c(&mut i2c, MS5849_ADDR, &[MS5849_RESET]);
         rprintln!("Written for the first time");
+        log_bytes(b"Written for the first time");
 
         // Read calibration values and CRC
         for i in 0..7 {

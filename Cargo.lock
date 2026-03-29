@@ -497,7 +497,7 @@ dependencies = [
 [[package]]
 name = "thalmann"
 version = "0.1.12"
-source = "git+https://github.com/SebastianThomas/STDC-thalmann.git#0aa52bfab73571961e0a16789d37d56f4e10e91d"
+source = "git+https://github.com/SebastianThomas/STDC-thalmann.git#ec58d10a94adcff18381dce8c6be44a11de8baae"
 dependencies = [
  "num",
 ]

@@ -3,6 +3,7 @@
 #![feature(const_trait_impl)]
 #![feature(const_default)]
 #![feature(generic_const_exprs)]
+#![feature(concat_bytes)]
 
 use panic_probe as _;
 
@@ -60,11 +61,14 @@ use stdc_stm32_rs::{
         spi_utils::DetailsError,
         uart_log::{ExternalLogger, UartLogger},
     },
+    concat_any_bytes,
 };
 
 static DISPLAY_STATE: Mutex<RefCell<DisplayState>> =
     Mutex::new(RefCell::new(DisplayState::default()));
+const ENABLE_BLUETOOTH: bool = true;
 static SERIAL_NUMBER: [u8; 4] = [0, 0, 0, 0];
+static BLUETOOTH_NAME: [u8; 8] = concat_any_bytes!(b"STDC", SERIAL_NUMBER);
 
 // TODO: Initial Position
 const INITIAL_FLASH_ADDRESS: u32 = 1 << 21;
@@ -315,7 +319,14 @@ fn main() -> ! {
         &mut apb1r1,
     );
     let (bluetooth_tx, bluetooth_rx) = bluetooth_uart.split();
-    let bluetooth = UartBluetoothModule::new(bluetooth_tx, bluetooth_rx, bluetooth_tx_ind);
+    let bluetooth = UartBluetoothModule {
+        uart_tx: bluetooth_tx,
+        uart_rx: bluetooth_rx,
+        tx_ind: bluetooth_tx_ind,
+    };
+    if ENABLE_BLUETOOTH {
+        let _bluetooth = bluetooth.initialize_bluetooth(&BLUETOOTH_NAME);
+    }
 
     // ---------- FINISH SETUP Protocols ----------
 

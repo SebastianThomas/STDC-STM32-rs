@@ -9,12 +9,15 @@ pub trait ExternalLogger {
 
 pub struct UartLogger<TX: Write<u8>, RX: Read<u8>> {
     uart_tx: TX,
-    uart_rx: RX,
+    _uart_rx: RX,
 }
 
 impl<TX: Write<u8>, RX: Read<u8>> UartLogger<TX, RX> {
     pub fn new(uart_tx: TX, uart_rx: RX) -> UartLogger<TX, RX> {
-        UartLogger { uart_tx, uart_rx }
+        UartLogger {
+            uart_tx,
+            _uart_rx: uart_rx,
+        }
     }
 }
 

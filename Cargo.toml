@@ -13,7 +13,7 @@ panic-halt = "1.0"
 panic-probe = { version = "1.0" , features = ["print-rtt"] }
 defmt = "1.0"
 libm = "0.2.15"
-thalmann = { git = "https://github.com/SebastianThomas/STDC-thalmann.git", version="0.1.10", features = ["thalmann"] }
+thalmann = { git = "https://github.com/SebastianThomas/STDC-thalmann.git", version="0.1.12", features = ["thalmann"] }
 num = { version = "0.4.3", default-features = false, features = ["libm"] }
 nb = "1.1.0"
 fixed = "1.31.0"

@@ -1,8 +1,8 @@
 use fixed::{FixedU16, traits::Fixed, types::U10F6};
 use thalmann::{
     dive::DiveMeasurement,
-    gas::GasMix,
-    pressure_unit::{Pa, Pressure},
+    gas::{CCRGas, GasMix},
+    pressure_unit::{AbsPressure, Pa, Pressure},
 };
 
 use crate::components::flash::Flash;
@@ -60,6 +60,24 @@ impl CurrentDiveModeWithInfo {
                 partial_pressure,
                 dil_idx,
             } => MSB_U8 | (*dil_idx as u8) & !MSB_U8,
+        }
+    }
+
+    pub fn to_fixed_gas<const NUM_GASES: usize, D: const AbsPressure>(
+        &self,
+        gases: &[GasMix<f32>; NUM_GASES],
+        depth: D,
+    ) -> GasMix<f32> {
+        match self {
+            CurrentDiveModeWithInfo::OC { gas_idx } => gases[*gas_idx],
+            CurrentDiveModeWithInfo::CC {
+                partial_pressure,
+                dil_idx,
+            } => CCRGas {
+                diluent: gases[*dil_idx],
+                set_point: *partial_pressure,
+            }
+            .to_fixed_gas_mix(depth),
         }
     }
 }
@@ -306,9 +324,9 @@ pub struct LogPointData {
 }
 
 impl LogPointData {
-    pub fn new(
+    pub fn new<P: const AbsPressure>(
         metadata: LogPointMetadata,
-        value: &DiveMeasurement,
+        value: &DiveMeasurement<P>,
         ascent_rate: u8,
         temperature: i8,
         battery: u8,

@@ -35,10 +35,11 @@ use thalmann::{
     calc_deco_schedule,
     display_utils::{format_f32, show_duration},
     dive::{DiveMeasurement, DiveProfile, StopSchedule},
-    gas::{GasMix, TissuesLoading},
+    gas::{GasMix, MAX_GAS_DENSITY, TissuesLoading},
     loadings_from_dive_profile,
     mptt::{NUM_TISSUES, TISSUES, XVAL_HE9_040_F32},
     pressure_unit::{Bar, Pa, Pressure, msw},
+    thalmann::DecoSettings,
 };
 
 use stdc_stm32_rs::{
@@ -441,6 +442,13 @@ fn start_log_dive<I: Write + Read + WriteRead, LFn: Fn(&[u8]) -> (), F: Flash, L
 {
     let dive_start_millis = millis_tim2();
 
+    let deco_settings = DecoSettings {
+        gas_density_settings: thalmann::gas::GasDensitySettings::Limit {
+            limit: MAX_GAS_DENSITY.to_pa(),
+        },
+        max_deco_po2: Bar::new(1.6).to_pa(),
+    };
+
     let gases = [thalmann::gas::AIR];
     let dive_profile = DiveProfile {
         dive_id: 1,
@@ -481,6 +489,7 @@ fn start_log_dive<I: Write + Read + WriteRead, LFn: Fn(&[u8]) -> (), F: Flash, L
         surface_pressure,
         dive_control_data_block,
         ms5849_i2c,
+        &deco_settings,
         &gases,
         &mut loading,
         &mut current_gas_mode_idx,
@@ -500,6 +509,7 @@ fn dive_start_and_loop<
     surface_pressure: Pa,
     dive_control_data_block: LogDiveControlDataBlock<NUM_GASES>,
     ms5849_i2c: &mut MS5849<'_, I, (), LFn>,
+    deco_settings: &DecoSettings<Pa>,
     gases: &[GasMix<f32>; NUM_GASES],
     loading: &mut TissuesLoading<NUM_TISSUES, Pa>,
     current_gas_mode_idx: &mut CurrentDiveModeWithInfo,
@@ -554,6 +564,8 @@ fn dive_start_and_loop<
                     &mut last_logged_millis,
                     &mut last_logged_pressure,
                     &mut max_depth,
+                    loading,
+                    gases,
                     &current_gas_mode_idx,
                 );
             }
@@ -572,7 +584,7 @@ fn dive_start_and_loop<
                 );
             }
         };
-        let stops = calc_deco_schedule(loading, &gases);
+        let stops = calc_deco_schedule(loading, &gases, &deco_settings);
         match stops {
             Ok(stops) => display_set_stop_schedule(stops),
             Err(err) => rprintln!("Got error while calculating deco schedule: {:?}.", err),
@@ -581,7 +593,7 @@ fn dive_start_and_loop<
     }
 }
 
-fn handle_depth_measurement<R: RateAlgorithm<Pa, Pa, u32>, F: Flash>(
+fn handle_depth_measurement<const NUM_GASES: usize, R: RateAlgorithm<Pa, Pa, u32>, F: Flash>(
     flash_log_algorithm: &mut R,
     flash: &mut F,
     pressure: Pa,
@@ -591,6 +603,8 @@ fn handle_depth_measurement<R: RateAlgorithm<Pa, Pa, u32>, F: Flash>(
     last_logged_millis: &mut u32,
     last_logged_pressure: &mut Pa,
     max_depth: &mut Pa,
+    loading: &mut TissuesLoading<NUM_TISSUES, Pa>,
+    gases: &[GasMix<f32>; NUM_GASES],
     current_gas_mode_idx: &CurrentDiveModeWithInfo,
 ) {
     rprintln!("Measuring Pressure: {:?}, depth: {:?}", pressure, depth);
@@ -607,11 +621,12 @@ fn handle_depth_measurement<R: RateAlgorithm<Pa, Pa, u32>, F: Flash>(
         *max_depth = pressure;
     }
 
-    // TODO: Add Measurement to Dive Profile
-    todo!("Add Measurement: {:?}", measurement);
-
-    // TODO: Update loading
-    todo!("Update Loading with Time Delta: {}", time_delta);
+    let current_gas = current_gas_mode_idx.to_fixed_gas(gases, pressure);
+    loading.tick(
+        time_delta.try_into().unwrap_or(u16::MAX),
+        pressure,
+        &current_gas,
+    );
 
     let next_log_time_delta = flash_log_algorithm.next_iter(*last_logged_pressure, pressure);
     let next_iter_due_in = next_log_time_delta.map(|n| *last_logged_millis + n);

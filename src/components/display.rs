@@ -7,6 +7,7 @@ use thalmann::{
     gas::{AIR, GasMix, TissuesLoading},
     mptt,
     pressure_unit::{Pa, Pressure, msw},
+    thalmann::DecoSettings,
 };
 
 use super::spi_utils::SpiError;
@@ -33,11 +34,18 @@ impl const Default for DisplayState {
 }
 
 impl DisplayState {
-    pub fn new<const NUM_GASES: usize>(gases: &[GasMix<f32>; NUM_GASES]) -> Self {
+    pub fn new<const NUM_GASES: usize>(
+        gases: &[GasMix<f32>; NUM_GASES],
+        deco_settings: &DecoSettings<Pa>,
+    ) -> Self {
         DisplayState {
             depth: msw(0.0),
             dive_time: Duration::from_millis(0),
-            stop_schedule: calc_deco_schedule::<MAX_STOP_NUMS, NUM_GASES>(&ZERO_LOADING_AIR, gases),
+            stop_schedule: calc_deco_schedule::<MAX_STOP_NUMS, NUM_GASES>(
+                &ZERO_LOADING_AIR,
+                gases,
+                deco_settings,
+            ),
         }
     }
 }

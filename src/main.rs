@@ -56,7 +56,7 @@ use stdc_stm32_rs::{
         MS5849,
         battery_status::{BatterySnapshot, BatteryStatusError, BatteryStatusI2C, Max17262Variant},
         bluetooth::UartBluetoothModule,
-        display::{DisplayState, MAX_STOP_NUMS, SpiDisplay},
+        display::{DisplayState, LedDisplay, MAX_STOP_NUMS, SpiDisplay},
         dive_log::{
             CurrentDiveModeWithInfo, LevelState, LogDiveControlDataBlock, LogPointData,
             LogPointMetadata,
@@ -221,7 +221,20 @@ fn main() -> ! {
         &mut apb2,
     );
     let mut display = SpiDisplay::new(display_en, display_spi, spi_reset, not_data_command);
-    let _ = display.turn_on();
+    match display.turn_on() {
+        Ok(_changed) => log_bytes(&logger, b"Turned on the display."),
+        Err(e) => {
+            log_bytes(&logger, b"Failed to turn on the display");
+            log_bytes(&logger, e.details.as_bytes());
+        }
+    };
+    match display.show_splashscreen(&BLUETOOTH_NAME) {
+        Ok(_) => log_bytes(&logger, b"Showing Splash Screen"),
+        Err(e) => {
+            log_bytes(&logger, b"Failed to show the Splash Screen");
+            log_bytes(&logger, e.details.as_bytes());
+        }
+    };
 
     // Flash SPI
     let mut flash_cs_nss = gpiob

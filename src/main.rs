@@ -46,7 +46,7 @@ use stdc_stm32_rs::{
         helpers::datetime_to_epoch_seconds,
         rate_algorithm::{DynamicDiffAimdRateAlgorithm, FixedRateAlgorithm, RateAlgorithm},
     },
-    barometric::DepthOrAltitude,
+    barometric::{DepthOrAltitude, SURFACE_PA},
     components::{
         MS5849,
         battery_status::{BatterySnapshot, BatteryStatusError, BatteryStatusI2C, Max17262Variant},
@@ -71,6 +71,8 @@ static BLUETOOTH_NAME: [u8; 8] = concat_any_bytes!(b"STDC", SERIAL_NUMBER);
 
 // TODO: Initial Position
 const INITIAL_FLASH_ADDRESS: u32 = 1 << 21;
+
+const DIVE_END_TOLERANCE_MILLIS: u32 = 10_000;
 
 #[entry]
 fn main() -> ! {
@@ -460,7 +462,8 @@ where
                 }
             }
         }
-        match ms5849_i2c.depth_or_altitude() {
+        // TODO: Average pressure over last hour?
+        match ms5849_i2c.depth_relative_or_altitude(SURFACE_PA) {
             Ok(DepthOrAltitude::Depth { pressure, depth }) => {
                 rprintln!(
                     "Starting Dive: Pressure: {:?}, depth: {:?}",
@@ -577,7 +580,8 @@ fn dive_start_and_loop<
     current_gas_mode_idx: &mut CurrentDiveModeWithInfo,
     flash: &mut F,
     logger: &Mutex<RefCell<L>>,
-) where
+) -> (u32, Pa)
+where
     [(); NUM_GASES * 3]: Sized,
     [(); 24 + NUM_GASES * 3]: Sized,
     [(); 4 + 24 + NUM_GASES * 3]: Sized,
@@ -606,6 +610,8 @@ fn dive_start_and_loop<
 
     let mut max_depth = surface_pressure;
 
+    let mut diving_until_millis = dive_start_millis;
+
     loop {
         let current_millis = millis_tim2_since(dive_start_millis);
         let duration_since_start =
@@ -614,8 +620,16 @@ fn dive_start_and_loop<
 
         let measurement_millis = millis_tim2();
         ms5849_i2c.read_i2c();
-        match ms5849_i2c.depth_or_altitude() {
+        let pressure = match ms5849_i2c.pressure() {
+            Some(p) => p,
+            None => continue,
+        };
+        if pressure < surface_pressure {
+            todo!("Handle Surface Pressure")
+        }
+        match ms5849_i2c.depth_relative_or_altitude(surface_pressure) {
             Ok(DepthOrAltitude::Depth { pressure, depth }) => {
+                diving_until_millis = dive_start_millis;
                 handle_depth_measurement(
                     &mut flash_log_algorithm,
                     flash,
@@ -637,6 +651,9 @@ fn dive_start_and_loop<
                     pressure,
                     altitude
                 );
+                if diving_until_millis - current_millis > DIVE_END_TOLERANCE_MILLIS {
+                    return (diving_until_millis, surface_pressure);
+                }
             }
             Err((pressure, err)) => {
                 rprintln!(

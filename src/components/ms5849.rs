@@ -381,15 +381,18 @@ impl<'a, I, P> MS5849<'a, I, P> {
         return self.TEMP.map(|t| t as f32 / 100.0);
     }
 
-    pub fn depth_or_altitude(&self) -> Result<DepthOrAltitude, (Option<Pa>, &str)> {
+    pub fn depth_relative_or_altitude(
+        &self,
+        surf_ref: Pa,
+    ) -> Result<DepthOrAltitude, (Option<Pa>, &str)> {
         let pressure = match self.pressure() {
             Some(p) => p,
             None => return Err((None, "No pressure")),
         };
-        // TODO: Support Altitude Diving
-        let is_submerged = pressure > SURFACE_PA;
+        // TODO: Allow slight difference
+        let is_submerged = (pressure - surf_ref).to_f32() > 0.0;
         if is_submerged {
-            let pressure_below = pressure - SURFACE_PA;
+            let pressure_below = pressure - surf_ref;
             let depth: f32 = (pressure_below / self.config.fluid_density_10m).to_f32();
             return Ok(DepthOrAltitude::Depth {
                 pressure,

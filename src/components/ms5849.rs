@@ -8,10 +8,10 @@ use stm32l4xx_hal::hal::blocking::spi;
 
 use thalmann::pressure_unit::{Bar, Pa, Pressure, msw};
 
-use crate::barometric::{
+use crate::constants::barometric::{
     ALT_PER_FOOT, DepthOrAltitude, FEET_TO_METERS, KG_M2_FRESH_WATER, RLGM, SURFACE_PA,
 };
-use crate::spi::{spi_read_register, spi_write_delay};
+use crate::protocols::spi::{spi_read_register, spi_write_delay};
 
 use libm::powf;
 

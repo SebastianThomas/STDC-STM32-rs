@@ -46,7 +46,6 @@ use stdc_stm32_rs::{
         helpers::datetime_to_epoch_seconds,
         rate_algorithm::{DynamicDiffAimdRateAlgorithm, FixedRateAlgorithm, RateAlgorithm},
     },
-    barometric::{DepthOrAltitude, SURFACE_PA},
     components::{
         MS5849,
         battery_status::{BatterySnapshot, BatteryStatusError, BatteryStatusI2C, Max17262Variant},
@@ -60,6 +59,7 @@ use stdc_stm32_rs::{
         spi_utils::DetailsError,
         uart_log::{ExternalLogger, UartLogger},
     },
+    constants::barometric::{DepthOrAltitude, SURFACE_PA},
     concat_any_bytes,
 };
 
@@ -395,7 +395,7 @@ fn main() -> ! {
         break;
     }
 
-    rprintln!("Starting main waiting loop");
+    rprintln!("Starting main loop");
     loop {
         let (surface_pressure, first_dive_pressure) =
             surface_interval_wait(&mut ms5849_i2c, &mut flash, &delay, &logger);

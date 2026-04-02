@@ -4,18 +4,17 @@
 #![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 
-#[cfg(all(test, not(target_os = "none")))]
-extern crate std;
-
 pub mod algorithms;
-pub mod barometric;
+pub mod constants;
 pub mod macros;
 
 #[cfg(target_os = "none")]
 pub mod components;
 
 #[cfg(target_os = "none")]
-pub mod spi;
+pub mod protocols;
 
+#[cfg(all(test, not(target_os = "none")))]
+extern crate std;
 #[cfg(all(test, not(target_os = "none")))]
 mod tests;

@@ -312,11 +312,11 @@ where
 }
 
 impl<'a, I, P> MS5849<'a, I, P> {
-    pub fn measure_pressure_to_bar(&self) -> Option<Bar> {
+    pub fn current_pressure_bar(&self) -> Option<Bar> {
         self.pressure().map(|pa: Pa| pa.to_bar())
     }
 
-    pub fn measure_pressure_to_pa(&self) -> Option<Pa> {
+    pub fn current_pressure_pa(&self) -> Option<Pa> {
         self.pressure()
     }
 

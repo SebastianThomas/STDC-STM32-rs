@@ -24,6 +24,14 @@ pub trait BluetoothModule {
         nb::block!(self.uart_rx().read()).map_err(Error::Uart)
     }
 
+    fn try_read_byte(&mut self) -> Result<Option<u8>, Error<Self::UartError>> {
+        match self.uart_rx().read() {
+            Ok(b) => Ok(Some(b)),
+            Err(nb::Error::WouldBlock) => Ok(None),
+            Err(nb::Error::Other(e)) => Err(Error::Uart(e)),
+        }
+    }
+
     fn read_line(&mut self, buf: &mut [u8]) -> Result<usize, Error<Self::UartError>> {
         let mut i = 0;
         loop {

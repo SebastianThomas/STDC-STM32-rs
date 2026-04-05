@@ -103,28 +103,56 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
     }
 
     pub fn erase_chip(&mut self) -> Result<(), SpiError> {
-        self.spi_write_operation(&[ERASE_CHIP_INSTRUCTION])
+        self.write_enable(true)?;
+        let erase_res = self.spi_write_operation(&[ERASE_CHIP_INSTRUCTION]);
+        let disable_res = self.write_enable(false);
+        if let Err(e) = erase_res {
+            Err(e)
+        } else {
+            disable_res
+        }
     }
 
     pub fn erase_64k(&mut self, addr: u32) -> Result<(), SpiError> {
         let mut buf = [0u8; 4];
         buf[0] = ERASE_64K_INSTRUCTION;
         buf[1..=3].copy_from_slice(&get_24bit_addr(addr));
-        self.spi_write_operation(&buf)
+        self.write_enable(true)?;
+        let erase_res = self.spi_write_operation(&buf);
+        let disable_res = self.write_enable(false);
+        if let Err(e) = erase_res {
+            Err(e)
+        } else {
+            disable_res
+        }
     }
 
     pub fn erase_32k(&mut self, addr: u32) -> Result<(), SpiError> {
         let mut buf = [0u8; 4];
         buf[0] = ERASE_32K_INSTRUCTION;
         buf[1..=3].copy_from_slice(&get_24bit_addr(addr));
-        self.spi_write_operation(&buf)
+        self.write_enable(true)?;
+        let erase_res = self.spi_write_operation(&buf);
+        let disable_res = self.write_enable(false);
+        if let Err(e) = erase_res {
+            Err(e)
+        } else {
+            disable_res
+        }
     }
 
     pub fn erase_4k(&mut self, addr: u32) -> Result<(), SpiError> {
         let mut buf = [0u8; 4];
         buf[0] = ERASE_4K_INSTRUCTION;
         buf[1..=3].copy_from_slice(&get_24bit_addr(addr));
-        self.spi_write_operation(&buf)
+        self.write_enable(true)?;
+        let erase_res = self.spi_write_operation(&buf);
+        let disable_res = self.write_enable(false);
+        if let Err(e) = erase_res {
+            Err(e)
+        } else {
+            disable_res
+        }
     }
 
     fn write_enable(&mut self, enable: bool) -> Result<(), SpiError> {

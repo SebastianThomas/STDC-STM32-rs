@@ -5,6 +5,7 @@ use thalmann::{
     pressure_unit::{AbsPressure, Pa, Pressure},
 };
 
+#[cfg(target_os = "none")]
 use crate::components::flash::Flash;
 
 pub const FIRMWARE_VERSION: u16 = 0;
@@ -127,6 +128,157 @@ where
     [(); 24 + GAS_NR * 3]: Sized,
     [(); GAS_NR * 3]: Sized,
 {
+    pub fn from_bytes(bytes: &[u8]) -> Option<(Self, usize)> {
+        if bytes.len() < 24 {
+            return None;
+        }
+
+        let gas_nr = bytes[23] as usize;
+        if gas_nr > GAS_NR {
+            return None;
+        }
+
+        let gas_content_len = gas_nr * 3;
+        let total_len = 24 + gas_content_len;
+        if bytes.len() < total_len {
+            return None;
+        }
+
+        let mut gas_content = [0u8; GAS_NR * 3];
+        if gas_content_len > 0 {
+            gas_content[..gas_content_len].copy_from_slice(&bytes[24..total_len]);
+        }
+
+        Some((
+            Self {
+                firmware_version: u16::from_be_bytes([bytes[0], bytes[1]]),
+                computer_serial_nr: bytes[2],
+                log_model_version: bytes[3],
+                time_offset: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+                surface_interval: u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+                dive_number: u16::from_be_bytes([bytes[12], bytes[13]]),
+                surface_pressure: u16::from_be_bytes([bytes[14], bytes[15]]),
+                surface_temperature: bytes[16] as i8,
+                ascent_rate_agg: bytes[17],
+                salinity: match bytes[18] {
+                    0 => Salinity::FRESH,
+                    1 => Salinity::EN13319,
+                    2 => Salinity::SALT,
+                    _ => Salinity::FRESH,
+                },
+                dive_mode: match bytes[19] {
+                    0 => DiveMode::OC,
+                    1 => DiveMode::CC,
+                    _ => DiveMode::OC,
+                },
+                deco_algorithm: match bytes[20] {
+                    0 => DecoAlgorithm::Exponential,
+                    1 => DecoAlgorithm::LinearExponential,
+                    _ => DecoAlgorithm::Exponential,
+                },
+                gf_low: bytes[21],
+                gf_high: bytes[22],
+                gas_nr: bytes[23],
+                gas_content,
+            },
+            total_len,
+        ))
+    }
+
+    pub fn gas_content_len(&self) -> usize {
+        self.gas_nr as usize * 3
+    }
+
+    pub fn gas_content_bytes(&self) -> &[u8] {
+        &self.gas_content[..self.gas_content_len()]
+    }
+
+    pub fn firmware_version(&self) -> u16 {
+        self.firmware_version
+    }
+
+    pub fn computer_serial_number(&self) -> u8 {
+        self.computer_serial_nr
+    }
+
+    pub fn log_model_version(&self) -> u8 {
+        self.log_model_version
+    }
+
+    pub fn time_offset(&self) -> u32 {
+        self.time_offset
+    }
+
+    pub fn surface_interval(&self) -> u32 {
+        self.surface_interval
+    }
+
+    pub fn dive_number(&self) -> u16 {
+        self.dive_number
+    }
+
+    pub fn surface_pressure_hpa(&self) -> u16 {
+        self.surface_pressure
+    }
+
+    pub fn surface_temperature_half_c(&self) -> i8 {
+        self.surface_temperature
+    }
+
+    pub fn ascent_rate_agg_seconds(&self) -> u8 {
+        self.ascent_rate_agg
+    }
+
+    pub fn salinity_value(&self) -> Salinity {
+        self.salinity
+    }
+
+    pub fn dive_mode_value(&self) -> DiveMode {
+        self.dive_mode
+    }
+
+    pub fn deco_algorithm_value(&self) -> DecoAlgorithm {
+        self.deco_algorithm
+    }
+
+    pub fn gf_low_value(&self) -> u8 {
+        self.gf_low
+    }
+
+    pub fn gf_high_value(&self) -> u8 {
+        self.gf_high
+    }
+
+    pub fn raw_bytes(&self) -> [u8; 24 + GAS_NR * 3] {
+        let mut bytes = [0u8; 24 + GAS_NR * 3];
+        bytes[0] = (self.firmware_version >> 8 & 0xFF) as u8;
+        bytes[1] = (self.firmware_version & 0xFF) as u8;
+        bytes[2] = self.computer_serial_nr;
+        bytes[3] = self.log_model_version;
+        bytes[4] = (self.time_offset >> 24 & 0xFF) as u8;
+        bytes[5] = (self.time_offset >> 16 & 0xFF) as u8;
+        bytes[6] = (self.time_offset >> 8 & 0xFF) as u8;
+        bytes[7] = (self.time_offset & 0xFF) as u8;
+        bytes[8] = (self.surface_interval >> 24 & 0xFF) as u8;
+        bytes[9] = (self.surface_interval >> 16 & 0xFF) as u8;
+        bytes[10] = (self.surface_interval >> 8 & 0xFF) as u8;
+        bytes[11] = (self.surface_interval & 0xFF) as u8;
+        bytes[12] = (self.dive_number >> 8 & 0xFF) as u8;
+        bytes[13] = (self.dive_number & 0xFF) as u8;
+        bytes[14] = (self.surface_pressure >> 8 & 0xFF) as u8;
+        bytes[15] = (self.surface_pressure & 0xFF) as u8;
+        bytes[16] = (self.surface_temperature & 0xFFu8 as i8) as u8;
+        bytes[17] = self.ascent_rate_agg;
+        bytes[18] = self.salinity as u8;
+        bytes[19] = self.dive_mode as u8;
+        bytes[20] = self.deco_algorithm as u8;
+        bytes[21] = self.gf_low;
+        bytes[22] = self.gf_high;
+        bytes[23] = self.gas_nr;
+        bytes[24..].copy_from_slice(&self.gas_content);
+        bytes
+    }
+
     pub fn new(
         start_epoch_seconds: u32,
         surface_interval_seconds: u32,
@@ -175,6 +327,7 @@ where
         })
     }
 
+    #[cfg(target_os = "none")]
     pub fn write<F: Flash>(&self, flash: &mut F) -> Result<u32, F::Error>
     where
         [(); 4 + (24 + GAS_NR * 3)]: Sized,
@@ -214,6 +367,7 @@ where
 }
 
 #[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LevelState {
     Level,
     Ascending,
@@ -293,6 +447,10 @@ impl LogPointMetadata {
         }
         arr
     }
+
+    pub fn byte(&self) -> u8 {
+        self.byte
+    }
 }
 
 pub struct BasicLogPointData {
@@ -302,6 +460,45 @@ pub struct BasicLogPointData {
     battery: u8,
     temperature: i8,
     ascent_rate: u8,
+}
+
+impl BasicLogPointData {
+    pub fn time_delta_seconds(&self) -> u16 {
+        self.time_delta
+    }
+
+    pub fn depth(&self) -> U10F6 {
+        self.depth_m
+    }
+
+    pub fn metadata(&self) -> LogPointMetadata {
+        self.metadata
+    }
+
+    pub fn battery(&self) -> u8 {
+        self.battery
+    }
+
+    pub fn temperature(&self) -> i8 {
+        self.temperature
+    }
+
+    pub fn ascent_rate(&self) -> u8 {
+        self.ascent_rate
+    }
+
+    pub fn to_bytes(&self) -> [u8; 8] {
+        [
+            (self.time_delta >> 8 & 0xFF) as u8,
+            (self.time_delta & 0xFF) as u8,
+            (self.depth_m.to_bits() >> 8 & 0xFF) as u8,
+            (self.depth_m.to_bits() & 0xFF) as u8,
+            self.metadata.byte(),
+            self.battery,
+            self.temperature as u8,
+            self.ascent_rate,
+        ]
+    }
 }
 
 pub struct DecoLogPointData {
@@ -315,9 +512,85 @@ pub struct DecoLogPointData {
     cns: u8,
 }
 
+impl DecoLogPointData {
+    pub fn to_bytes(&self) -> [u8; 8] {
+        [
+            self.ndl,
+            self.ceiling,
+            self.gf99,
+            self.leading_tissue_id,
+            self.risk,
+            self.gas_mix_id,
+            self.po2,
+            self.cns,
+        ]
+    }
+}
+
 pub struct LogPointData {
     basic_data: BasicLogPointData,
     deco_data: Option<DecoLogPointData>,
+}
+
+impl LogPointData {
+    pub fn from_bytes(bytes: &[u8]) -> Option<(Self, usize)> {
+        if bytes.len() < 8 {
+            return None;
+        }
+
+        let has_deco = (bytes[4] & (1 << 7)) != 0;
+        let basic_data = BasicLogPointData {
+            time_delta: u16::from_be_bytes([bytes[0], bytes[1]]),
+            depth_m: U10F6::from_bits(u16::from_be_bytes([bytes[2], bytes[3]])),
+            metadata: LogPointMetadata { byte: bytes[4] },
+            battery: bytes[5],
+            temperature: bytes[6] as i8,
+            ascent_rate: bytes[7],
+        };
+
+        let deco_data = if has_deco {
+            if bytes.len() < 16 {
+                return None;
+            }
+
+            Some(DecoLogPointData {
+                ndl: bytes[8],
+                ceiling: bytes[9],
+                gf99: bytes[10],
+                leading_tissue_id: bytes[11],
+                risk: bytes[12],
+                gas_mix_id: bytes[13],
+                po2: bytes[14],
+                cns: bytes[15],
+            })
+        } else {
+            None
+        };
+
+        Some((
+            Self {
+                basic_data,
+                deco_data,
+            },
+            if has_deco { 16 } else { 8 },
+        ))
+    }
+
+    pub fn basic_data(&self) -> &BasicLogPointData {
+        &self.basic_data
+    }
+
+    pub fn deco_data(&self) -> Option<&DecoLogPointData> {
+        self.deco_data.as_ref()
+    }
+
+    pub fn basic_bytes(&self) -> [u8; 8] {
+        self.basic_data.to_bytes()
+    }
+
+    pub fn deco_bytes(&self) -> Option<[u8; 8]> {
+        self.deco_data.as_ref().map(DecoLogPointData::to_bytes)
+    }
 }
 
 impl LogPointData {
@@ -342,6 +615,7 @@ impl LogPointData {
         }
     }
 
+    #[cfg(target_os = "none")]
     pub fn write<F: Flash>(&self, flash: &mut F) -> Result<(u32, Option<u32>), F::Error> {
         // Make sure metadata optional pages are always valid
         let metadata =

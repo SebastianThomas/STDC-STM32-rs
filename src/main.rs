@@ -446,6 +446,8 @@ mod app {
                 if !bluetooth_ready
                     || modes::bluetooth::run_bluetooth_mode_tick(
                         cx.local.bluetooth_mode_state,
+                        cx.local.bluetooth.as_mut().unwrap(),
+                        cx.local.flash,
                         cx.local.logger,
                     )
                 {

@@ -21,7 +21,6 @@ use super::{SurfaceModeExit, millis_tim2, millis_tim2_since};
 const SURFACE_POLL_INTERVAL_MILLIS: u32 = 5 * 1000;
 
 const SURFACE_LOG_INTERVAL_MILLIS: u32 = 2 * 60 * 1000;
-
 pub struct SurfaceModeState {
     prev_surface_altitude: Option<Pa>,
     flash_log_algorithm: FixedRateAlgorithm,

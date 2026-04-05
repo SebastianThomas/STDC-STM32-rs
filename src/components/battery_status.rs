@@ -80,11 +80,7 @@ impl<I: Write + WriteRead> BatteryStatus for BatteryStatusI2C<'_, I> {
 }
 
 impl<'a, I: Write + WriteRead> BatteryStatusI2C<'a, I> {
-    pub fn new(
-        i2c: I,
-        delay: &'a Mutex<RefCell<Delay>>,
-        variant: Max17262Variant,
-    ) -> Self {
+    pub fn new(i2c: I, delay: &'a Mutex<RefCell<Delay>>, variant: Max17262Variant) -> Self {
         Self::with_address(i2c, delay, MAX17262_I2C_ADDRESS, variant)
     }
 

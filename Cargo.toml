@@ -24,6 +24,8 @@ num = { version = "0.4.3", default-features = false, features = ["libm"] }
 nb = "1.1.0"
 fixed = "1.31.0"
 heapless = "0.9.2"
+rtic = { version = "2.2.0", features = ["thumbv7-backend"] }
+rtic-monotonics = { version = "2.1.0", features = ["stm32l486rg", "stm32_tim5"] }
 
 [target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
 stm32l4xx-hal = { version = "0.7.1", default-features = false, features = ["rt", "stm32l486"] }

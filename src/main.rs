@@ -472,9 +472,9 @@ mod app {
                     )
                 {
                     transition_into_surface(cx.local.mode, cx.local.surface_mode_state);
+                } else {
+                    Mono::delay(BLUETOOTH_TASK_DELAY_MILLIS.millis()).await;
                 }
-
-                Mono::delay(BLUETOOTH_TASK_DELAY_MILLIS.millis()).await;
             }
             AppMode::Dive => {
                 let Some(runtime) = cx.local.dive_runtime.as_mut() else {

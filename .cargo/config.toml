@@ -6,8 +6,7 @@ rustflags = [
     "-C", "link-arg=-Tlink.x",
 ]
 
-[build]
-target = "thumbv7em-none-eabihf"
-
 [alias]
-t = "test --target x86_64-apple-darwin --lib"
+t = "test --lib"
+b = "build --target thumbv7em-none-eabihf"
+bd = "build --target thumbv7em-none-eabihf --release"

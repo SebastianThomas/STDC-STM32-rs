@@ -345,15 +345,18 @@ mod app {
         let _ = task_battery_update::spawn();
         let _ = task_mode_tick::spawn();
 
+        let mut bluetooth_mode_state = modes::bluetooth::BluetoothModeState::new();
+        bluetooth_mode_state.on_enter();
+
         (
             Shared {
                 latest_measurements: LatestMeasurements::new(),
             },
             Local {
-                mode: AppMode::Surface,
+                mode: AppMode::Bluetooth,
                 mode_surface_pressure: DEFAULT_SURFACE_PRESSURE,
                 surface_mode_state: modes::surface::SurfaceModeState::new(),
-                bluetooth_mode_state: modes::bluetooth::BluetoothModeState::new(),
+                bluetooth_mode_state,
                 rtc,
                 display,
                 flash,

@@ -16,6 +16,7 @@ use stdc_stm32_rs::components::{
 use super::{millis_tim2, millis_tim2_since};
 
 const BLUETOOTH_MODE_INACTIVITY_TIMEOUT_MILLIS: u32 = 20_000;
+const BLUETOOTH_MODE_MAX_SESSION_MILLIS: u32 = 60_000;
 const MAX_RX_BYTES_PER_TICK: usize = 128;
 const MAX_COMMAND_LINE_BYTES: usize = 640;
 const MAX_FW_CHUNK_BYTES: usize = 128;
@@ -64,6 +65,7 @@ impl FirmwareTransferState {
 }
 
 pub struct BluetoothModeState {
+    entered_millis: u32,
     last_activity_millis: u32,
     logged_entry: bool,
     logged_timeout: bool,
@@ -77,6 +79,7 @@ pub struct BluetoothModeState {
 impl BluetoothModeState {
     pub fn new() -> Self {
         Self {
+            entered_millis: 0,
             last_activity_millis: 0,
             logged_entry: false,
             logged_timeout: false,
@@ -89,7 +92,9 @@ impl BluetoothModeState {
     }
 
     pub fn on_enter(&mut self) {
-        self.last_activity_millis = millis_tim2();
+        let now = millis_tim2();
+        self.entered_millis = now;
+        self.last_activity_millis = now;
         self.logged_entry = false;
         self.logged_timeout = false;
         self.command_line_len = 0;
@@ -119,16 +124,24 @@ pub fn run_bluetooth_mode_tick<L: ExternalLogger>(
 
     poll_and_handle_bluetooth_rx(state, bluetooth, flash, logger);
 
-    let inactive_timed_out =
-        millis_tim2_since(state.last_activity_millis) >= BLUETOOTH_MODE_INACTIVITY_TIMEOUT_MILLIS;
+    let idle_elapsed = millis_tim2_since(state.last_activity_millis);
+    let session_elapsed = millis_tim2_since(state.entered_millis);
+    let inactive_timed_out = idle_elapsed >= BLUETOOTH_MODE_INACTIVITY_TIMEOUT_MILLIS;
+    let session_timed_out = session_elapsed >= BLUETOOTH_MODE_MAX_SESSION_MILLIS;
+    let timed_out = inactive_timed_out || session_timed_out;
 
-    if inactive_timed_out && !state.logged_timeout {
-        log_bytes(logger, b"Bluetooth mode exiting due to inactivity timeout");
-        rprintln!("Bluetooth mode exiting due to inactivity timeout");
+    if timed_out && !state.logged_timeout {
+        if session_timed_out {
+            log_bytes(logger, b"Bluetooth mode exiting due to session timeout");
+            rprintln!("Bluetooth mode exiting due to session timeout");
+        } else {
+            log_bytes(logger, b"Bluetooth mode exiting due to inactivity timeout");
+            rprintln!("Bluetooth mode exiting due to inactivity timeout");
+        }
         state.logged_timeout = true;
     }
 
-    inactive_timed_out
+    timed_out
 }
 
 fn poll_and_handle_bluetooth_rx<L: ExternalLogger>(

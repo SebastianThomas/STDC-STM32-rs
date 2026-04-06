@@ -29,7 +29,7 @@ pub enum AppMode {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SurfaceModeExit {
     Dive(Pa),
-    Bluetooth(Pa),
+    _Bluetooth(Pa),
 }
 
 pub static DISPLAY_STATE: Mutex<RefCell<DisplayState>> =

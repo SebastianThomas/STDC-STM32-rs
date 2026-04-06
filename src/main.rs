@@ -438,7 +438,7 @@ mod app {
                             surface_pressure,
                         ));
                     }
-                    Some(SurfaceModeExit::Bluetooth(surface_pressure)) => {
+                    Some(SurfaceModeExit::_Bluetooth(surface_pressure)) => {
                         *cx.local.mode_surface_pressure = surface_pressure;
                         *cx.local.mode = AppMode::Bluetooth;
                         cx.local.bluetooth_mode_state.on_enter();

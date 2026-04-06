@@ -1,4 +1,5 @@
 use core::{cell::RefCell, time::Duration};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use cortex_m::interrupt::{Mutex, free};
 use stm32l4xx_hal::{pac::TIM2, timer::Timer};
@@ -12,6 +13,11 @@ use stdc_stm32_rs::components::display::{DisplayState, LedDisplay, MAX_STOP_NUMS
 pub mod bluetooth;
 pub mod dive;
 pub mod surface;
+
+pub const POWER_CUT_UNSAFE_FLASH_WRITE: u8 = 1 << 0;
+pub const POWER_CUT_UNSAFE_FW_TRANSFER: u8 = 1 << 1;
+
+static POWER_CUT_UNSAFE_MASK: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppMode {
@@ -63,4 +69,22 @@ pub fn millis_tim2() -> u32 {
 
 pub fn millis_tim2_since(start: u32) -> u32 {
     Timer::<TIM2>::count().wrapping_sub(start)
+}
+
+pub fn power_cut_mark_unsafe(flag: u8) {
+    POWER_CUT_UNSAFE_MASK.fetch_or(flag, Ordering::Relaxed);
+    crate::sync_power_cut_indicator();
+}
+
+pub fn power_cut_mark_safe(flag: u8) {
+    POWER_CUT_UNSAFE_MASK.fetch_and(!flag, Ordering::Relaxed);
+    crate::sync_power_cut_indicator();
+}
+
+pub fn power_cut_unsafe_mask() -> u8 {
+    POWER_CUT_UNSAFE_MASK.load(Ordering::Relaxed)
+}
+
+pub fn is_power_cut_safe() -> bool {
+    power_cut_unsafe_mask() == 0
 }

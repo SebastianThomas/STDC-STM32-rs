@@ -16,7 +16,10 @@ use stdc_stm32_rs::{
     constants::barometric::{DepthOrAltitude, SURFACE_PA},
 };
 
-use super::{SurfaceModeExit, millis_tim2, millis_tim2_since};
+use super::{
+    POWER_CUT_UNSAFE_FLASH_WRITE, SurfaceModeExit, millis_tim2, millis_tim2_since,
+    power_cut_mark_safe, power_cut_mark_unsafe,
+};
 
 const SURFACE_POLL_INTERVAL_MILLIS: u32 = 5 * 1000;
 
@@ -161,7 +164,10 @@ fn log_data_flash<F: Flash>(
         temperature,
         battery,
     );
-    match data.write(flash) {
+    power_cut_mark_unsafe(POWER_CUT_UNSAFE_FLASH_WRITE);
+    let write_res = data.write(flash);
+    power_cut_mark_safe(POWER_CUT_UNSAFE_FLASH_WRITE);
+    match write_res {
         Ok(_) => {
             state.last_logged_millis = current_measurement_millis;
         }

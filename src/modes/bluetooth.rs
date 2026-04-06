@@ -13,7 +13,10 @@ use stdc_stm32_rs::components::{
     uart_log::ExternalLogger,
 };
 
-use super::{millis_tim2, millis_tim2_since};
+use super::{
+    POWER_CUT_UNSAFE_FLASH_WRITE, POWER_CUT_UNSAFE_FW_TRANSFER, is_power_cut_safe, millis_tim2,
+    millis_tim2_since, power_cut_mark_safe, power_cut_mark_unsafe, power_cut_unsafe_mask,
+};
 
 const BLUETOOTH_MODE_INACTIVITY_TIMEOUT_MILLIS: u32 = 20_000;
 const BLUETOOTH_MODE_MAX_SESSION_MILLIS: u32 = 60_000;
@@ -216,8 +219,18 @@ fn handle_command_line<L: ExternalLogger>(
         "HELP" => {
             send_line(
                 bluetooth,
-                b"CMDS PING HELP LOG_BEGIN LOG_NEXT FW_BEGIN<size_hex> FW_CHUNK<payload_hex> FW_END FW_ABORT",
+                b"CMDS PING HELP PWR_SAFE LOG_BEGIN LOG_NEXT FW_BEGIN<size_hex> FW_CHUNK<payload_hex> FW_END FW_ABORT",
             );
+        }
+        "PWR_SAFE" => {
+            let mut response: String<96> = String::new();
+            let _ = write!(
+                response,
+                "{{\"type\":\"power_cut\",\"safe\":{},\"unsafe_mask\":{}}}",
+                is_power_cut_safe(),
+                power_cut_unsafe_mask()
+            );
+            send_line(bluetooth, response.as_bytes());
         }
         "LOG_BEGIN" => match flash.read::<4>(LOG_POINTER_ADDRESS) {
             Ok(end_bytes) => {
@@ -349,6 +362,7 @@ fn handle_command_line<L: ExternalLogger>(
                 return;
             }
 
+            power_cut_mark_unsafe(POWER_CUT_UNSAFE_FW_TRANSFER);
             state.fw_transfer.start(size);
             send_line(bluetooth, b"OK FW_BEGIN");
         }
@@ -379,11 +393,13 @@ fn handle_command_line<L: ExternalLogger>(
                 return;
             }
 
+            power_cut_mark_unsafe(POWER_CUT_UNSAFE_FLASH_WRITE);
             let write_res = write_flash_linear(
                 flash,
                 state.fw_transfer.next_addr,
                 &decoded[..decoded_len],
             );
+            power_cut_mark_safe(POWER_CUT_UNSAFE_FLASH_WRITE);
             if write_res.is_err() {
                 send_line(bluetooth, b"ERR FW_WRITE");
                 return;
@@ -406,10 +422,12 @@ fn handle_command_line<L: ExternalLogger>(
                 return;
             }
             state.fw_transfer.reset();
+            power_cut_mark_safe(POWER_CUT_UNSAFE_FW_TRANSFER);
             send_line(bluetooth, b"OK FW_END");
         }
         "FW_ABORT" => {
             state.fw_transfer.reset();
+            power_cut_mark_safe(POWER_CUT_UNSAFE_FW_TRANSFER);
             send_line(bluetooth, b"OK FW_ABORT");
         }
         _ => {

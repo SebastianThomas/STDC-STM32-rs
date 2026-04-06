@@ -58,6 +58,9 @@ stm32_tim5_monotonic!(Mono, 1_000);
 fn flash_log_bytes(_bytes: &[u8]) {}
 fn sensor_log_bytes(_bytes: &[u8]) {}
 
+static POWER_CUT_RED_INDICATOR: CmMutex<RefCell<Option<Pc9Output>>> =
+    CmMutex::new(RefCell::new(None));
+
 #[rtic::app(device = stm32l4xx_hal::pac, peripherals = true, dispatchers = [EXTI0])]
 mod app {
     use stdc_stm32_rs::components::display::SpiDisplay;
@@ -72,6 +75,7 @@ mod app {
     #[local]
     struct Local {
         mode: AppMode,
+        dive_mode_indicator: Pc8Output,
         mode_surface_pressure: thalmann::pressure_unit::Pa,
         surface_mode_state: modes::surface::SurfaceModeState,
         bluetooth_mode_state: modes::bluetooth::BluetoothModeState,
@@ -163,10 +167,13 @@ mod app {
 
         let mut dive_mode_indicator = gpioc
             .pc8
-            .into_push_pull_output(&mut gpioc.moder, &mut gpioc.otyper);
-        let mut red_indicator = gpioc
+            .into_open_drain_output(&mut gpioc.moder, &mut gpioc.otyper);
+        let red_indicator = gpioc
             .pc9
-            .into_push_pull_output(&mut gpioc.moder, &mut gpioc.otyper);
+            .into_open_drain_output(&mut gpioc.moder, &mut gpioc.otyper);
+        free(|cs| {
+            *POWER_CUT_RED_INDICATOR.borrow(cs).borrow_mut() = Some(red_indicator);
+        });
 
         let usart1_tx =
             gpioa
@@ -279,12 +286,17 @@ mod app {
             .map(u32::from_be_bytes);
         if cur_addr.is_err() || *cur_addr.as_ref().unwrap() == 0 {
             let new_pos = INITIAL_FLASH_ADDRESS + 4;
+            modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
             let _ = flash.write(&new_pos.to_be_bytes());
             let _ = flash.set_pos(new_pos);
+            modes::power_cut_mark_safe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
         } else {
             let _ = flash.set_pos(cur_addr.unwrap());
         }
+        modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
         let _ = flash.write(&SERIAL_NUMBER);
+        modes::power_cut_mark_safe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
+        sync_power_cut_indicator();
 
         let scl = gpiob.pb6.into_alternate_open_drain(
             &mut gpiob.moder,
@@ -338,9 +350,8 @@ mod app {
                 .pb11
                 .into_alternate(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrh);
 
-        red_indicator.toggle();
-        dive_mode_indicator.set_high();
-        dive_mode_indicator.set_low();
+        // Active-low indicator: start with LED off until Dive mode is entered.
+        let _ = dive_mode_indicator.set_high();
 
         let _ = task_battery_update::spawn();
         let _ = task_mode_tick::spawn();
@@ -354,6 +365,7 @@ mod app {
             },
             Local {
                 mode: AppMode::Bluetooth,
+                dive_mode_indicator,
                 mode_surface_pressure: DEFAULT_SURFACE_PRESSURE,
                 surface_mode_state: modes::surface::SurfaceModeState::new(),
                 bluetooth_mode_state,
@@ -383,6 +395,7 @@ mod app {
 
     #[task(priority = 1, shared = [latest_measurements], local = [
         mode,
+        dive_mode_indicator,
         mode_surface_pressure,
         surface_mode_state,
         bluetooth_mode_state,
@@ -400,6 +413,8 @@ mod app {
         dive_runtime
     ])]
     async fn task_mode_tick(mut cx: task_mode_tick::Context) {
+        sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
+
         match *cx.local.mode {
             AppMode::Surface => {
                 let surface_exit = cx.shared.latest_measurements.lock(|latest_measurements| {
@@ -429,6 +444,8 @@ mod app {
                         cx.local.bluetooth_mode_state.on_enter();
                     }
                     None => {
+                        sync_power_cut_indicator();
+                        sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
                         enter_stop2_for_surface(cx.local.rtc);
                         let _ = wake_reinit::spawn();
                         return;
@@ -462,6 +479,7 @@ mod app {
             AppMode::Dive => {
                 let Some(runtime) = cx.local.dive_runtime.as_mut() else {
                     transition_into_surface(cx.local.mode, cx.local.surface_mode_state);
+                    sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
                     let _ = task_mode_tick::spawn();
                     return;
                 };
@@ -486,6 +504,8 @@ mod app {
                 }
             }
         }
+
+        sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
 
         let _ = task_mode_tick::spawn();
     }
@@ -547,4 +567,24 @@ fn enter_stop2_for_surface(rtc: &mut Rtc) {
     cp.SCB.clear_sleepdeep();
 
     let _ = wakeup_timer.cancel();
+}
+
+pub fn sync_power_cut_indicator() {
+    free(|cs| {
+        if let Some(red_indicator) = POWER_CUT_RED_INDICATOR.borrow(cs).borrow_mut().as_mut() {
+            if modes::is_power_cut_safe() {
+                let _ = red_indicator.set_high();
+            } else {
+                let _ = red_indicator.set_low();
+            }
+        }
+    });
+}
+
+fn sync_dive_mode_indicator(dive_mode_indicator: &mut Pc8Output, mode: &AppMode) {
+    if matches!(mode, AppMode::Dive) {
+        let _ = dive_mode_indicator.set_low();
+    } else {
+        let _ = dive_mode_indicator.set_high();
+    }
 }

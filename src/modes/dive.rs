@@ -38,6 +38,7 @@ use crate::tasks::dive::{
 };
 
 use super::{display_set_depth, millis_tim2, millis_tim2_since};
+use super::{POWER_CUT_UNSAFE_FLASH_WRITE, power_cut_mark_safe, power_cut_mark_unsafe};
 
 const DIVE_END_TOLERANCE_MILLIS: u32 = 10_000;
 pub const DIVE_GAS_NR: usize = 1;
@@ -107,7 +108,10 @@ pub fn setup_dive_mode<F: Flash, L: ExternalLogger>(
         &gas_content,
     );
 
-    if let Err(e) = dive_control_data_block.write(flash) {
+    power_cut_mark_unsafe(POWER_CUT_UNSAFE_FLASH_WRITE);
+    let dive_control_write = dive_control_data_block.write(flash);
+    power_cut_mark_safe(POWER_CUT_UNSAFE_FLASH_WRITE);
+    if let Err(e) = dive_control_write {
         log_bytes(logger, b"Failed writing dive control data block.");
         log_bytes(logger, e.details().as_bytes());
     }
@@ -283,7 +287,10 @@ fn handle_depth_measurement<R: RateAlgorithm<Pa, Pa, u32>, F: Flash, const NR_GA
                     temperature,
                     battery,
                 );
-                match log_point_data.write(flash) {
+                power_cut_mark_unsafe(POWER_CUT_UNSAFE_FLASH_WRITE);
+                let write_res = log_point_data.write(flash);
+                power_cut_mark_safe(POWER_CUT_UNSAFE_FLASH_WRITE);
+                match write_res {
                     Ok(_) => {
                         *last_logged_millis = measurement_millis;
                         *last_logged_pressure = pressure;

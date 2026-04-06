@@ -59,6 +59,18 @@ pub type Pc5Output = stm32l4xx_hal::gpio::Pin<
     'C',
     5,
 >;
+pub type Pc8Output = stm32l4xx_hal::gpio::Pin<
+    stm32l4xx_hal::gpio::Output<stm32l4xx_hal::gpio::OpenDrain>,
+    stm32l4xx_hal::gpio::H8,
+    'C',
+    8,
+>;
+pub type Pc9Output = stm32l4xx_hal::gpio::Pin<
+    stm32l4xx_hal::gpio::Output<stm32l4xx_hal::gpio::OpenDrain>,
+    stm32l4xx_hal::gpio::H8,
+    'C',
+    9,
+>;
 pub type Pc4Output = stm32l4xx_hal::gpio::Pin<
     stm32l4xx_hal::gpio::Output<stm32l4xx_hal::gpio::PushPull>,
     stm32l4xx_hal::gpio::L8,

@@ -8,7 +8,7 @@ enabled = true
 enabled = true
 
 [default.probe]
-protocol = "Jtag"
+protocol = "Swd"
 
 [default.reset]
 enabled = true

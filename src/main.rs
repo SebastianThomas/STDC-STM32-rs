@@ -39,6 +39,8 @@ fn log_line<L: ExternalLogger>(logger: &mut L, msg: &str) {
 
 #[rtic::app(device = stm32l4xx_hal::pac, peripherals = true)]
 mod app {
+    use stm32l4xx_hal::rcc::{PllConfig, PllDivider};
+
     use super::*;
 
     #[shared]
@@ -68,7 +70,12 @@ mod app {
         let mut gpiob = cx.device.GPIOB.split(&mut ahb2);
         let mut gpioc = cx.device.GPIOC.split(&mut ahb2);
 
-        let clocks = rcc.cfgr.freeze(&mut flash.acr, &mut pwr);
+        let clocks = rcc
+            .cfgr
+            .sysclk_with_pll(32.MHz(), PllConfig::new(1, 8, PllDivider::Div4))
+            .pclk1(32.MHz())
+            .pclk2(32.MHz())
+            .freeze(&mut flash.acr, &mut pwr);
 
         let usart1_tx =
             gpioa

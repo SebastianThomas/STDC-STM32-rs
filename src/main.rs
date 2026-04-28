@@ -64,6 +64,7 @@ static POWER_CUT_RED_INDICATOR: CmMutex<RefCell<Option<Pc9Output>>> =
 #[rtic::app(device = stm32l4xx_hal::pac, peripherals = true, dispatchers = [EXTI0])]
 mod app {
     use stdc_stm32_rs::components::display::SpiDisplay;
+    use stm32l4xx_hal::rcc::{PllConfig, PllDivider};
 
     use super::*;
 
@@ -115,7 +116,12 @@ mod app {
         let mut gpiob = dp.GPIOB.split(&mut ahb2);
         let mut gpioc = dp.GPIOC.split(&mut ahb2);
 
-        let clocks = rcc.cfgr.freeze(&mut flash_pac.acr, &mut pwr);
+        let clocks = rcc
+            .cfgr
+            .sysclk_with_pll(32.MHz(), PllConfig::new(1, 8, PllDivider::Div4))
+            .pclk1(32.MHz())
+            .pclk2(32.MHz())
+            .freeze(&mut flash.acr, &mut pwr);
 
         Mono::start(clocks.pclk1().raw());
 

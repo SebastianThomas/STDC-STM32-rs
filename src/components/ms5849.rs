@@ -236,10 +236,6 @@ where
     ) -> MS5849<'a, I, ()> {
         let mut cal: [u16; 10] = [0; 10];
 
-        rprintln!("Created I2C Interface");
-
-        scan_i2c(&mut i2c, &log_bytes);
-
         /* Reset and Calibrate */
         // Reset the MS5837, per datasheet
         write_i2c(&mut i2c, MS5849_ADDR, &[MS5849_RESET]);
@@ -251,11 +247,6 @@ where
             // TODO: New MS5849 with new addresses from 4-13
             write_i2c(&mut i2c, MS5849_ADDR, &[MS5849_PROM_READ + i * 2]);
 
-            // let mut buf: [u8; 2] = [0; 2];
-            // if let Err(e) = i2c.read(MS5849_ADDR, &mut buf) {
-            //     rprintln!("Converting failed: {:?}", e);
-            //     panic!("Converting failed");
-            // }
             let buf: [u8; 2] = read_i2c(&mut i2c, MS5849_ADDR);
             cal[i as usize] = (buf[0] as u16) << 8 | buf[1] as u16;
         }

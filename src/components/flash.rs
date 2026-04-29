@@ -1,3 +1,4 @@
+use rtt_target::rprintln;
 use stm32l4xx_hal::hal::{
     blocking::spi::{Transfer, Write},
     digital::v2::OutputPin,
@@ -221,11 +222,13 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
             let mut buf = [0u8; WBYTES + RBYTES];
 
             // Fill command + address
-            buf[0..=WBYTES].copy_from_slice(op_data);
+            buf[0..WBYTES].copy_from_slice(op_data);
+            rprintln!("Copied from slice");
             // Remaining bytes = dummy writes (0x00)
             for i in 0..RBYTES {
                 buf[WBYTES + i] = 0x00;
             }
+            rprintln!("Start transfer");
             match self.spi.transfer(&mut buf) {
                 Ok(_) => {
                     let mut res = [0u8; RBYTES];

@@ -55,7 +55,9 @@ const BLUETOOTH_TASK_DELAY_MILLIS: u64 = 200;
 
 stm32_tim5_monotonic!(Mono, 1_000);
 
-fn flash_log_bytes(_bytes: &[u8]) {}
+fn flash_log_bytes(bytes: &[u8]) {
+    rprintln!("{}", str::from_utf8(bytes).unwrap());
+}
 fn sensor_log_bytes(_bytes: &[u8]) {}
 
 static POWER_CUT_RED_INDICATOR: CmMutex<RefCell<Option<Pc9Output>>> =
@@ -121,14 +123,25 @@ mod app {
             .sysclk_with_pll(32.MHz(), PllConfig::new(1, 8, PllDivider::Div4))
             .pclk1(32.MHz())
             .pclk2(32.MHz())
-            .freeze(&mut flash.acr, &mut pwr);
+            .freeze(&mut flash_pac.acr, &mut pwr);
 
         Mono::start(clocks.pclk1().raw());
 
         Timer::free_running_tim2(dp.TIM2, clocks, 1.kHz(), false, &mut apb1r1);
 
-        let rtc_config = RtcConfig::default().clock_config(RtcClockSource::LSE);
+        let delay: &'static DelayMutex = cortex_m::singleton!(: DelayMutex =
+            CmMutex::new(RefCell::new(Delay::new(core.SYST, clocks)))
+        )
+        .unwrap();
+
+        rprintln!("Clocks, TIM2, Delay set up");
+
+        // TODO: LSE crystal on first soldered PCB not responding (gets stuck after "RTC Config")
+        //  so using LSI for now
+        let rtc_config = RtcConfig::default().clock_config(RtcClockSource::LSI);
+        rprintln!("RTC Config");
         let mut rtc: Rtc = Rtc::rtc(dp.RTC, &mut apb1r1, &mut rcc.bdcr, &mut pwr.cr1, rtc_config);
+        rprintln!("RTC Config II");
         rtc.set_date_time(
             stm32l4xx_hal::datetime::Date {
                 day: 1,
@@ -144,6 +157,8 @@ mod app {
                 daylight_savings: false,
             },
         );
+
+        rprintln!("RTC set up");
 
         // PA13: JTMS-SWDIO
         let _tms =
@@ -166,10 +181,7 @@ mod app {
                 .pb3
                 .into_alternate::<0>(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrl);
 
-        let delay: &'static DelayMutex = cortex_m::singleton!(: DelayMutex =
-            CmMutex::new(RefCell::new(Delay::new(core.SYST, clocks)))
-        )
-        .unwrap();
+        rprintln!("SWD & Delay set up");
 
         let mut dive_mode_indicator = gpioc
             .pc8
@@ -200,7 +212,7 @@ mod app {
         let logger_obj = UartLogger::new(debug_tx, debug_rx);
         let logger: &'static LoggerMutex =
             cortex_m::singleton!(: LoggerMutex = CmMutex::new(RefCell::new(logger_obj))).unwrap();
-        log_bytes(logger, b"Logger to UART set up");
+        log_str(logger, "Logger to UART set up");
 
         // TODO: Check reset is actually push pull output for Display
         let spi_reset = gpioc
@@ -212,6 +224,8 @@ mod app {
         let not_data_command = gpiob
             .pb0
             .into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper);
+
+        log_str(logger, "Additional Pins for Display set up");
 
         let mut cs = gpioa
             .pa4
@@ -242,20 +256,21 @@ mod app {
             &mut apb2,
         );
         let mut display = SpiDisplay::new(display_en, display_spi, spi_reset, not_data_command);
-        match display.turn_on() {
-            Ok(_) => log_bytes(&logger, b"Turned on the display."),
-            Err(e) => {
-                log_bytes(&logger, b"Failed to turn on the display");
-                log_bytes(&logger, e.details.as_bytes());
-            }
-        }
-        match display.show_splashscreen(&BLUETOOTH_NAME) {
-            Ok(_) => log_bytes(&logger, b"Showing Splash Screen"),
-            Err(e) => {
-                log_bytes(&logger, b"Failed to show the Splash Screen");
-                log_bytes(&logger, e.details.as_bytes());
-            }
-        }
+        // match display.turn_on() {
+        //     Ok(_) => log_bytes(&logger, b"Turned on the display."),
+        //     Err(e) => {
+        //         log_bytes(&logger, b"Failed to turn on the display");
+        //         log_bytes(&logger, e.details.as_bytes());
+        //     }
+        // }
+        // match display.show_splashscreen(&BLUETOOTH_NAME) {
+        //     Ok(_) => log_bytes(&logger, b"Showing Splash Screen"),
+        //     Err(e) => {
+        //         log_bytes(&logger, b"Failed to show the Splash Screen");
+        //         log_bytes(&logger, e.details.as_bytes());
+        //     }
+        // }
+        log_str(logger, "Display finished setting up");
 
         let mut flash_cs_nss = gpiob
             .pb12
@@ -287,9 +302,12 @@ mod app {
         let mut flash: FlashDevice =
             SpiFlash::new(0, 1 << 22, flash_spi, flash_cs_nss, flash_log_bytes);
 
+        log_str(logger, "Flash Device set up");
+
         let cur_addr = flash
             .read::<4>(INITIAL_FLASH_ADDRESS)
             .map(u32::from_be_bytes);
+        log_str(logger, "Flash initial address read complete");
         if cur_addr.is_err() || *cur_addr.as_ref().unwrap() == 0 {
             let new_pos = INITIAL_FLASH_ADDRESS + 4;
             modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
@@ -303,6 +321,8 @@ mod app {
         let _ = flash.write(&SERIAL_NUMBER);
         modes::power_cut_mark_safe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
         sync_power_cut_indicator();
+
+        log_str(logger, "Flash write complete");
 
         let scl = gpiob.pb6.into_alternate_open_drain(
             &mut gpiob.moder,
@@ -322,6 +342,8 @@ mod app {
         );
         let ms5849_i2c: SensorMs5849<'static> =
             MS5849::new_i2c(sensor_i2c, delay, sensor_log_bytes);
+
+        log_str(logger, "Pressure Sensor set up");
 
         let scl = gpioc.pc0.into_alternate_open_drain(
             &mut gpioc.moder,
@@ -344,6 +366,8 @@ mod app {
             Max17262Variant::R,
         );
 
+        log_str(logger, "Battery Status");
+
         let bluetooth_tx_ind = gpiob
             .pb2
             .into_pull_down_input(&mut gpiob.moder, &mut gpiob.pupdr);
@@ -364,6 +388,9 @@ mod app {
 
         let mut bluetooth_mode_state = modes::bluetooth::BluetoothModeState::new();
         bluetooth_mode_state.on_enter();
+        log_str(logger, "Bluetooth set up");
+
+        log_str(logger, "Finished init task, returning");
 
         (
             Shared {
@@ -541,9 +568,10 @@ fn transition_into_surface(
     surface_mode_state.reset_for_entry();
 }
 
-fn log_bytes<L: ExternalLogger>(logger: &CmMutex<RefCell<L>>, bytes: &[u8]) {
+fn log_str<L: ExternalLogger>(logger: &CmMutex<RefCell<L>>, str: &str) {
+    rprintln!("{}", str);
     free(|cs| {
-        if let Err(_) = logger.borrow(cs).borrow_mut().log_bytes(bytes) {
+        if let Err(_) = logger.borrow(cs).borrow_mut().log_bytes(str.as_bytes()) {
             rprintln!("Failed logging bytes to UART");
         }
     });

@@ -23,7 +23,8 @@ use stm32l4xx_hal::{
     prelude::*,
 };
 
-pub const MS5849_ADDR: u8 = 0x76;
+// pub const MS5849_ADDR: u8 = 0x76;
+pub const MS5849_I2C_ADDR: u8 = 0xEE;
 // pub const MS5849_RESET: u8 = 0x1E;
 // pub const MS5849_ADC_READ: u8 = 0x00;
 // pub const MS5849_PROM_READ: u8 = 0xA0;
@@ -237,17 +238,20 @@ where
         let mut cal: [u16; 10] = [0; 10];
 
         /* Reset and Calibrate */
-        // Reset the MS5837, per datasheet
-        write_i2c(&mut i2c, MS5849_ADDR, &[MS5849_RESET]);
-        rprintln!("Written for the first time");
-        log_bytes(b"Written for the first time");
+        // Reset the MS5849, per datasheet
+        write_i2c(&mut i2c, MS5849_I2C_ADDR, &[MS5849_RESET]);
+
+        rprintln!("Reset MS5849 Pressure Sensor, waiting to get ready");
+        log_bytes(b"Reset MS5849 Pressure Sensor, waiting to get ready");
+
+        wait_us(delay, 300_u16);
 
         // Read calibration values and CRC
         for i in 0..7 {
             // TODO: New MS5849 with new addresses from 4-13
-            write_i2c(&mut i2c, MS5849_ADDR, &[MS5849_PROM_READ + i * 2]);
+            write_i2c(&mut i2c, MS5849_I2C_ADDR, &[MS5849_PROM_READ + i * 2]);
 
-            let buf: [u8; 2] = read_i2c(&mut i2c, MS5849_ADDR);
+            let buf: [u8; 2] = read_i2c(&mut i2c, MS5849_I2C_ADDR);
             cal[i as usize] = (buf[0] as u16) << 8 | buf[1] as u16;
         }
 
@@ -277,24 +281,32 @@ where
 
     pub fn read_i2c(&mut self) {
         // Request D1 conversion
-        write_i2c(&mut self.interface, MS5849_ADDR, &[MS5849_CONVERT_D1_8192]);
+        write_i2c(
+            &mut self.interface,
+            MS5849_I2C_ADDR,
+            &[MS5849_CONVERT_D1_8192],
+        );
 
         self.wait_ms(20u8); // Max conversion time per datasheet
 
-        write_i2c(&mut self.interface, MS5849_ADDR, &[MS5849_ADC_READ_D1]);
+        write_i2c(&mut self.interface, MS5849_I2C_ADDR, &[MS5849_ADC_READ_D1]);
 
-        let buf: [u8; 3] = read_i2c(&mut self.interface, MS5849_ADDR);
+        let buf: [u8; 3] = read_i2c(&mut self.interface, MS5849_I2C_ADDR);
         let d1_pres = (buf[0] as u32) << 16 | (buf[0] as u32) << 8 | buf[0] as u32;
         self.D1_pres = Some(d1_pres);
 
         // Request D2 conversion
-        write_i2c(&mut self.interface, MS5849_ADDR, &[MS5849_CONVERT_D2_8192]);
+        write_i2c(
+            &mut self.interface,
+            MS5849_I2C_ADDR,
+            &[MS5849_CONVERT_D2_8192],
+        );
 
         self.wait_ms(20u8); // Max conversion time per datasheet
 
-        write_i2c(&mut self.interface, MS5849_ADDR, &[MS5849_ADC_READ_D2]);
+        write_i2c(&mut self.interface, MS5849_I2C_ADDR, &[MS5849_ADC_READ_D2]);
 
-        let buf: [u8; 3] = read_i2c(&mut self.interface, MS5849_ADDR);
+        let buf: [u8; 3] = read_i2c(&mut self.interface, MS5849_I2C_ADDR);
         let d2_temp = (buf[0] as u32) << 16 | (buf[0] as u32) << 8 | buf[0] as u32;
         self.D2_temp = Some(d2_temp);
 

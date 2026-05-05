@@ -80,7 +80,12 @@ where
     };
     let current_measurement_millis = millis_tim2();
     let temperature_c = ms5849_i2c.temperature();
-    latest_measurements.record_environment(pressure, None, temperature_c, current_measurement_millis);
+    latest_measurements.record_environment(
+        pressure,
+        None,
+        temperature_c,
+        current_measurement_millis,
+    );
 
     let next_flash_iter = state
         .flash_log_algorithm

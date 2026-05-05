@@ -37,8 +37,8 @@ use crate::tasks::dive::{
     DiveTaskState, refresh_display_if_due, update_deco_schedule_if_due, update_dive_time_if_due,
 };
 
-use super::{display_set_depth, millis_tim2, millis_tim2_since};
 use super::{POWER_CUT_UNSAFE_FLASH_WRITE, power_cut_mark_safe, power_cut_mark_unsafe};
+use super::{display_set_depth, millis_tim2, millis_tim2_since};
 
 const DIVE_END_TOLERANCE_MILLIS: u32 = 10_000;
 pub const DIVE_GAS_NR: usize = 1;
@@ -197,7 +197,12 @@ where
             );
         }
         Ok(DepthOrAltitude::Altitude { pressure, altitude }) => {
-            latest_measurements.record_environment(pressure, None, temperature_c, measurement_millis);
+            latest_measurements.record_environment(
+                pressure,
+                None,
+                temperature_c,
+                measurement_millis,
+            );
             rprintln!(
                 "Dive mode pressure: {:?}, altitude: {:?}",
                 pressure,

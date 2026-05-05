@@ -351,11 +351,8 @@ fn handle_command_line<L: ExternalLogger>(
                 return;
             }
 
-            let erase_result = erase_flash_range_4k(
-                flash,
-                FW_SLOT_START_ADDRESS,
-                FW_SLOT_START_ADDRESS + size,
-            );
+            let erase_result =
+                erase_flash_range_4k(flash, FW_SLOT_START_ADDRESS, FW_SLOT_START_ADDRESS + size);
             if erase_result.is_err() {
                 send_line(bluetooth, b"ERR FW_ERASE");
                 log_bytes(logger, b"FW erase failed");
@@ -394,19 +391,22 @@ fn handle_command_line<L: ExternalLogger>(
             }
 
             power_cut_mark_unsafe(POWER_CUT_UNSAFE_FLASH_WRITE);
-            let write_res = write_flash_linear(
-                flash,
-                state.fw_transfer.next_addr,
-                &decoded[..decoded_len],
-            );
+            let write_res =
+                write_flash_linear(flash, state.fw_transfer.next_addr, &decoded[..decoded_len]);
             power_cut_mark_safe(POWER_CUT_UNSAFE_FLASH_WRITE);
             if write_res.is_err() {
                 send_line(bluetooth, b"ERR FW_WRITE");
                 return;
             }
 
-            state.fw_transfer.next_addr = state.fw_transfer.next_addr.saturating_add(decoded_len as u32);
-            state.fw_transfer.received = state.fw_transfer.received.saturating_add(decoded_len as u32);
+            state.fw_transfer.next_addr = state
+                .fw_transfer
+                .next_addr
+                .saturating_add(decoded_len as u32);
+            state.fw_transfer.received = state
+                .fw_transfer
+                .received
+                .saturating_add(decoded_len as u32);
 
             let mut response: String<48> = String::new();
             let _ = write!(response, "OK {:08X}", state.fw_transfer.received);
@@ -506,15 +506,12 @@ fn decode_control_block(
     let mut bytes = [0u8; MAX_LOG_CONTROL_BYTES];
     bytes[..24].copy_from_slice(&header);
     if gas_nr > 0 {
-        read_flash_linear(
-            flash,
-            start_addr + 24,
-            &mut bytes[24..total_len],
-        )?;
+        read_flash_linear(flash, start_addr + 24, &mut bytes[24..total_len])?;
     }
 
-    let (control, consumed) = LogDiveControlDataBlock::<MAX_LOG_CONTROL_GASES>::from_bytes(&bytes[..total_len])
-        .ok_or(())?;
+    let (control, consumed) =
+        LogDiveControlDataBlock::<MAX_LOG_CONTROL_GASES>::from_bytes(&bytes[..total_len])
+            .ok_or(())?;
 
     Ok((control, consumed))
 }
@@ -556,7 +553,9 @@ fn read_flash_linear(
     out: &mut [u8],
 ) -> Result<(), ()> {
     for (idx, slot) in out.iter_mut().enumerate() {
-        let data = flash.read_bytes::<1>(start_addr + idx as u32).map_err(|_| ())?;
+        let data = flash
+            .read_bytes::<1>(start_addr + idx as u32)
+            .map_err(|_| ())?;
         *slot = data[0];
     }
     Ok(())

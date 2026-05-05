@@ -10,13 +10,13 @@ pub fn calc_battery_status(
     latest_measurements: &mut crate::LatestMeasurements,
 ) {
     if let Ok(BatterySnapshot {
-            state_of_charge_percent,
-            voltage_mv,
-            current_ma,
-            temperature_c,
-            remaining_capacity_mah,
-            full_capacity_mah,
-        }) = battery_status.read_snapshot()
+        state_of_charge_percent,
+        voltage_mv,
+        current_ma,
+        temperature_c,
+        remaining_capacity_mah,
+        full_capacity_mah,
+    }) = battery_status.read_snapshot()
     {
         let taken_millis = millis_tim2();
         latest_measurements.record_battery(

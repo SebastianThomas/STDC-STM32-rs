@@ -16,11 +16,15 @@ use rtt_target::{rprintln, rtt_init_print};
 
 use stm32l4xx_hal::{
     delay::Delay,
-    hal::spi::MODE_0,
-    hal::timer::{Cancel, CountDown},
+    hal::{
+        spi::MODE_0,
+        timer::{Cancel, CountDown},
+    },
     i2c::{self, I2c},
-    pac,
+    pac::{self, SYST, TIM2},
     prelude::*,
+    pwr::Pwr,
+    rcc::{APB1R1, Clocks, PllConfig, PllDivider},
     rtc::{Rtc, RtcClockSource, RtcConfig},
     serial::Serial,
     spi::Spi,
@@ -66,7 +70,6 @@ static POWER_CUT_RED_INDICATOR: CmMutex<RefCell<Option<Pc9Output>>> =
 #[rtic::app(device = stm32l4xx_hal::pac, peripherals = true, dispatchers = [EXTI0])]
 mod app {
     use stdc_stm32_rs::components::display::SpiDisplay;
-    use stm32l4xx_hal::rcc::{PllConfig, PllDivider};
 
     use super::*;
 
@@ -118,21 +121,16 @@ mod app {
         let mut gpiob = dp.GPIOB.split(&mut ahb2);
         let mut gpioc = dp.GPIOC.split(&mut ahb2);
 
-        let clocks = rcc
-            .cfgr
-            .sysclk_with_pll(32.MHz(), PllConfig::new(1, 8, PllDivider::Div4))
-            .pclk1(32.MHz())
-            .pclk2(32.MHz())
-            .freeze(&mut flash_pac.acr, &mut pwr);
+        let (clocks, delay) = init_clocks_delay(
+            rcc.cfgr,
+            &mut flash_pac.acr,
+            &mut pwr,
+            dp.TIM2,
+            &mut apb1r1,
+            core.SYST,
+        );
 
-        Mono::start(clocks.pclk1().raw());
-
-        Timer::free_running_tim2(dp.TIM2, clocks, 1.kHz(), false, &mut apb1r1);
-
-        let delay: &'static DelayMutex = cortex_m::singleton!(: DelayMutex =
-            CmMutex::new(RefCell::new(Delay::new(core.SYST, clocks)))
-        )
-        .unwrap();
+        let delay: &'static DelayMutex = cortex_m::singleton!(: DelayMutex = delay).unwrap();
 
         rprintln!("Clocks, TIM2, Delay set up");
 
@@ -554,10 +552,50 @@ mod app {
     }
 
     #[task(priority = 1)]
-    async fn wake_reinit(_: wake_reinit::Context) {
-        Mono::delay(2_u64.secs()).await;
+    async fn wake_reinit(cx: wake_reinit::Context) {
+        rprintln!("Waking up, reinit clocks");
+        let dp = unsafe { pac::Peripherals::steal() };
+        let cp = unsafe { cortex_m::Peripherals::steal() };
+        let mut rcc = dp.RCC.constrain();
+        let mut flash_pac = dp.FLASH.constrain();
+        let mut pwr = dp.PWR.constrain(&mut rcc.apb1r1);
+
+        dp.DBGMCU.cr.modify(|_, w| w.trace_ioen().set_bit());
+        init_clocks_delay(
+            rcc.cfgr,
+            &mut flash_pac.acr,
+            &mut pwr,
+            dp.TIM2,
+            &mut rcc.apb1r1,
+            cp.SYST,
+        );
+        rprintln!("Checking Delay");
+        Mono::delay(2_u64.micros()).await;
+        rprintln!("Spawning main task");
         let _ = task_mode_tick::spawn();
     }
+}
+
+fn init_clocks_delay(
+    cfgr: stm32l4xx_hal::rcc::CFGR,
+    acr: &mut stm32l4xx_hal::flash::ACR,
+    pwr: &mut Pwr,
+    tim2: TIM2,
+    apb1r1: &mut APB1R1,
+    syst: SYST,
+) -> (Clocks, CmMutex<RefCell<Delay>>) {
+    let clocks = cfgr
+        .sysclk_with_pll(32.MHz(), PllConfig::new(1, 8, PllDivider::Div4))
+        .pclk1(32.MHz())
+        .pclk2(32.MHz())
+        .freeze(acr, pwr);
+
+    Mono::start(clocks.pclk1().raw());
+
+    Timer::free_running_tim2(tim2, clocks, 1.kHz(), false, apb1r1);
+
+    let delay = CmMutex::new(RefCell::new(Delay::new(syst, clocks)));
+    (clocks, delay)
 }
 
 fn transition_into_surface(
@@ -571,7 +609,8 @@ fn transition_into_surface(
 fn log_str<L: ExternalLogger>(logger: &CmMutex<RefCell<L>>, str: &str) {
     rprintln!("{}", str);
     free(|cs| {
-        if let Err(_) = logger.borrow(cs).borrow_mut().log_bytes(str.as_bytes()) {
+        let logged = logger.borrow(cs).borrow_mut().log_bytes(str.as_bytes());
+        if logged.is_err() {
             rprintln!("Failed logging bytes to UART");
         }
     });

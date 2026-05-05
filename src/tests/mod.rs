@@ -115,8 +115,7 @@ mod bluetooth_serialization_tests {
             GasMix::new(0.32, 0.0).expect("valid gas"),
         ];
 
-        let block =
-            LogDiveControlDataBlock::<2>::new(1_700_000_000, 1234, 42, 1013, 23, 4, &gases);
+        let block = LogDiveControlDataBlock::<2>::new(1_700_000_000, 1234, 42, 1013, 23, 4, &gases);
         let raw = block.raw_bytes();
         let (decoded, consumed) =
             LogDiveControlDataBlock::<2>::from_bytes(&raw).expect("decode control block");
@@ -157,8 +156,12 @@ mod bluetooth_serialization_tests {
 
     #[test]
     fn log_point_decode_with_deco_payload_is_lossless() {
-        let metadata =
-            LogPointMetadata::new(true, true, LevelState::Ascending, [false, false, false, true]);
+        let metadata = LogPointMetadata::new(
+            true,
+            true,
+            LevelState::Ascending,
+            [false, false, false, true],
+        );
         let mut bytes = [0u8; 16];
         bytes[0] = 0x00;
         bytes[1] = 0x3C;

@@ -1,5 +1,5 @@
-use core::{cell::RefCell, time::Duration};
 use core::sync::atomic::{AtomicU8, Ordering};
+use core::{cell::RefCell, time::Duration};
 
 use cortex_m::interrupt::{Mutex, free};
 use stm32l4xx_hal::{pac::TIM2, timer::Timer};

@@ -552,7 +552,7 @@ mod app {
     }
 
     #[task(priority = 1)]
-    async fn wake_reinit(cx: wake_reinit::Context) {
+    async fn wake_reinit(_: wake_reinit::Context) {
         rprintln!("Waking up, reinit clocks");
         let dp = unsafe { pac::Peripherals::steal() };
         let cp = unsafe { cortex_m::Peripherals::steal() };

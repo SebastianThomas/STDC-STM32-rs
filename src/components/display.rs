@@ -2,11 +2,11 @@ use core::time::Duration;
 
 use thalmann::{
     DINC, calc_deco_schedule,
+    deco_algorithm::DecoSettings,
     dive::StopSchedule,
     gas::{AIR, GasMix, TissuesLoading},
     mptt,
     pressure_unit::{Pa, Pressure, msw},
-    thalmann::DecoSettings,
 };
 
 use super::spi_utils::DetailsError;

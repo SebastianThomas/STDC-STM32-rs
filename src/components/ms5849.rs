@@ -68,6 +68,7 @@ pub struct MS5849<'a, INTERFACE, P> {
     delay: &'a Mutex<RefCell<Delay>>,
 }
 
+#[allow(unused)]
 fn scan_i2c<I: Write, L: Fn(&[u8]) -> ()>(i2c: &mut I, log_bytes: L)
 where
     <I as cortex_m::prelude::_embedded_hal_blocking_i2c_Write>::Error: Debug,

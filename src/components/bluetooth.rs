@@ -1,3 +1,4 @@
+use rtt_target::rprintln;
 use stm32l4xx_hal::hal::{
     digital::v2::InputPin,
     serial::{Read, Write},
@@ -80,6 +81,7 @@ where
         let mut bluetooth = self.enter_command_mode()?;
         bluetooth.set_device_name(bluetooth_name)?;
         bluetooth.start_advertising()?;
+        rprintln!("Started advertising successfully");
         bluetooth.exit_command_mode()
     }
 }

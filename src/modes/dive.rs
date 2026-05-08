@@ -7,12 +7,12 @@ use stm32l4xx_hal::{
     rtc::Rtc,
 };
 use thalmann::{
+    deco_algorithm::DecoSettings,
     dive::{DiveMeasurement, DiveProfile},
-    gas::{GasMix, MAX_GAS_DENSITY, TissuesLoading},
+    gas::{self, GasDensitySettings, GasMix, MAX_GAS_DENSITY, TissuesLoading},
     loadings_from_dive_profile,
     mptt::{NUM_TISSUES, TISSUES, XVAL_HE9_040_F32},
     pressure_unit::{Bar, Pa, Pressure, msw},
-    thalmann::DecoSettings,
 };
 
 use stdc_stm32_rs::{
@@ -68,13 +68,13 @@ pub fn setup_dive_mode<F: Flash, L: ExternalLogger>(
     let dive_start_millis = millis_tim2();
 
     let deco_settings = DecoSettings {
-        gas_density_settings: thalmann::gas::GasDensitySettings::Limit {
+        gas_density_settings: GasDensitySettings::Limit {
             limit: MAX_GAS_DENSITY.to_pa(),
         },
         max_deco_po2: Bar::new(1.6).to_pa(),
     };
 
-    let gases = [thalmann::gas::AIR];
+    let gases = [gas::AIR];
     let dive_profile = DiveProfile {
         dive_id: 1,
         max_depth: surface_pressure,

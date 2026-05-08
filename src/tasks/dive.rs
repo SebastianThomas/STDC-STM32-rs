@@ -4,10 +4,10 @@ use cortex_m::interrupt::{Mutex, free};
 use rtt_target::rprintln;
 use thalmann::{
     calc_deco_schedule,
+    deco_algorithm::DecoSettings,
     gas::{GasMix, TissuesLoading},
     mptt::NUM_TISSUES,
     pressure_unit::Pa,
-    thalmann::DecoSettings,
 };
 
 use stdc_stm32_rs::components::spi_utils::DetailsError;

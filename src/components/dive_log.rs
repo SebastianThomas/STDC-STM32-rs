@@ -13,7 +13,6 @@ pub const COMPUTER_SERIAL_NUMBER: u8 = 0;
 pub const LOG_MODEL_VERSION: u8 = 0;
 pub const SALINITY: Salinity = Salinity::FRESH;
 pub const DIVE_MODE: DiveMode = DiveMode::OC;
-pub const DECO_ALGORITHM: DecoAlgorithm = DecoAlgorithm::Exponential;
 pub const GF_LOW: u8 = 50;
 pub const GF_HIGH: u8 = 75;
 
@@ -82,7 +81,7 @@ impl CurrentDiveModeWithInfo {
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum DecoAlgorithm {
+pub enum DecoAlgorithmType {
     Exponential,
     LinearExponential,
 }
@@ -102,7 +101,7 @@ where
     pub ascent_rate_agg: u8,
     pub salinity: Salinity,
     pub dive_mode: DiveMode,
-    pub deco_algorithm: DecoAlgorithm,
+    pub deco_algorithm: DecoAlgorithmType,
     pub gf_low: u8,
     pub gf_high: u8,
     pub gas_nr: u8,
@@ -172,9 +171,9 @@ where
                     _ => DiveMode::OC,
                 },
                 deco_algorithm: match bytes[20] {
-                    0 => DecoAlgorithm::Exponential,
-                    1 => DecoAlgorithm::LinearExponential,
-                    _ => DecoAlgorithm::Exponential,
+                    0 => DecoAlgorithmType::Exponential,
+                    1 => DecoAlgorithmType::LinearExponential,
+                    _ => DecoAlgorithmType::Exponential,
                 },
                 gf_low: bytes[21],
                 gf_high: bytes[22],
@@ -237,7 +236,7 @@ where
         self.dive_mode
     }
 
-    pub fn deco_algorithm_value(&self) -> DecoAlgorithm {
+    pub fn deco_algorithm_value(&self) -> DecoAlgorithmType {
         self.deco_algorithm
     }
 
@@ -287,6 +286,7 @@ where
         surface_temperature: i8,
         ascent_rate_agg_seconds: u8,
         gas_content: &[GasMix<f32>; GAS_NR],
+        deco_algorithm: DecoAlgorithmType,
     ) -> Self
     where
         [(); GAS_NR * 3]: Sized,
@@ -303,7 +303,7 @@ where
             ascent_rate_agg: ascent_rate_agg_seconds,
             salinity: SALINITY,
             dive_mode: DIVE_MODE,
-            deco_algorithm: DECO_ALGORITHM,
+            deco_algorithm: deco_algorithm,
             gf_low: GF_LOW,
             gf_high: GF_HIGH,
             gas_nr: GAS_NR as u8,

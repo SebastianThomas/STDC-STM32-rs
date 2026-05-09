@@ -23,8 +23,8 @@ use stdc_stm32_rs::{
     components::{
         MS5849,
         dive_log::{
-            CurrentDiveModeWithInfo, LevelState, LogDiveControlDataBlock, LogPointData,
-            LogPointMetadata,
+            CurrentDiveModeWithInfo, DecoAlgorithmType, LevelState, LogDiveControlDataBlock,
+            LogPointData, LogPointMetadata,
         },
         flash::Flash,
         spi_utils::DetailsError,
@@ -42,6 +42,11 @@ use super::{display_set_depth, millis_tim2, millis_tim2_since};
 
 const DIVE_END_TOLERANCE_MILLIS: u32 = 10_000;
 pub const DIVE_GAS_NR: usize = 1;
+
+#[cfg(feature = "lin_exp")]
+pub const DECO_ALGORITHM_TYPE: DecoAlgorithmType = DecoAlgorithmType::LinearExponential;
+#[cfg(not(feature = "lin_exp"))]
+pub const DECO_ALGORITHM_TYPE: DecoAlgorithmType = DecoAlgorithmType::Exponential;
 
 pub struct DiveRuntime<const GAS_NR: usize> {
     dive_start_millis: u32,
@@ -106,6 +111,7 @@ pub fn setup_dive_mode<F: Flash, L: ExternalLogger>(
         surface_temperature_2,
         ascent_rate_agg_seconds,
         &gas_content,
+        DECO_ALGORITHM_TYPE,
     );
 
     power_cut_mark_unsafe(POWER_CUT_UNSAFE_FLASH_WRITE);

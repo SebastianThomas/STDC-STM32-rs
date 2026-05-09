@@ -19,7 +19,7 @@ panic-halt = "1.0"
 panic-probe = { version = "1.0" , features = ["print-rtt"] }
 defmt = "1.0"
 libm = "0.2.15"
-thalmann = { git = "https://github.com/SebastianThomas/STDC-thalmann.git", version="0.1.14", features = ["thalmann"] }
+thalmann = { git = "https://github.com/SebastianThomas/STDC-thalmann.git", version="0.1.14" }
 num = { version = "0.4.3", default-features = false, features = ["libm"] }
 nb = "1.1.0"
 fixed = "1.31.0"
@@ -34,3 +34,7 @@ stm32l4xx-hal = { version = "0.7.1", default-features = false, features = ["rt",
 name = "stdc_stm32_rs"
 path = "src/main.rs"
 test = false
+
+[features]
+default = ["lin_exp"]
+lin_exp = ["thalmann/thalmann"]

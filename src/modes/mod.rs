@@ -2,11 +2,11 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use core::{cell::RefCell, time::Duration};
 
 use cortex_m::interrupt::{Mutex, free};
-use stm32l4xx_hal::{pac::TIM2, timer::Timer};
-use thalmann::{
+use stdc_diving_algorithms::{
     dive::StopSchedule,
     pressure_unit::{Pa, Pressure},
 };
+use stm32l4xx_hal::{pac::TIM2, timer::Timer};
 
 use stdc_stm32_rs::components::display::{DisplayState, LedDisplay, MAX_STOP_NUMS};
 

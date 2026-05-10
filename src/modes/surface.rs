@@ -2,8 +2,8 @@ use core::{cell::RefCell, fmt::Debug};
 
 use cortex_m::interrupt::{Mutex, free};
 use rtt_target::rprintln;
+use stdc_diving_algorithms::{dive::DiveMeasurement, pressure_unit::Pa};
 use stm32l4xx_hal::hal::blocking::i2c::{Read, Write, WriteRead};
-use thalmann::{dive::DiveMeasurement, pressure_unit::Pa};
 
 use stdc_stm32_rs::{
     algorithms::rate_algorithm::{FixedRateAlgorithm, RateAlgorithm},

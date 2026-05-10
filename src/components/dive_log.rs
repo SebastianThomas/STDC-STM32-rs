@@ -1,5 +1,5 @@
 use fixed::types::U10F6;
-use thalmann::{
+use stdc_diving_algorithms::{
     dive::DiveMeasurement,
     gas::{CCRGas, GasMix},
     pressure_unit::{AbsPressure, Pa, Pressure},
@@ -303,7 +303,7 @@ where
             ascent_rate_agg: ascent_rate_agg_seconds,
             salinity: SALINITY,
             dive_mode: DIVE_MODE,
-            deco_algorithm: deco_algorithm,
+            deco_algorithm,
             gf_low: GF_LOW,
             gf_high: GF_HIGH,
             gas_nr: GAS_NR as u8,

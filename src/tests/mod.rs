@@ -102,7 +102,7 @@ mod bluetooth_serialization_tests {
     use crate::dive_log_host::{
         LevelState, LogDiveControlDataBlock, LogPointData, LogPointMetadata,
     };
-    use thalmann::{
+    use stdc_diving_algorithms::{
         dive::DiveMeasurement,
         gas::GasMix,
         pressure_unit::{Pa, Pressure},

@@ -2,17 +2,18 @@ use core::{cell::RefCell, fmt::Debug};
 
 use cortex_m::interrupt::{Mutex, free};
 use rtt_target::rprintln;
+use stdc_diving_algorithms::{
+    deco_algorithm::{DecoSettings, MVALUES, TISSUES},
+    dive::{DiveMeasurement, DiveProfile},
+    gas::{GasDensitySettings, GasMix, MAX_GAS_DENSITY, TissuesLoading},
+    loadings_from_dive_profile,
+    o2tox::{O2ExposureType, O2ToxCalculation, calculate_toxicity_diff},
+    pressure_unit::{Bar, Pa, Pressure, msw},
+    setup::NUM_TISSUES,
+};
 use stm32l4xx_hal::{
     hal::blocking::i2c::{Read, Write, WriteRead},
     rtc::Rtc,
-};
-use thalmann::{
-    deco_algorithm::DecoSettings,
-    dive::{DiveMeasurement, DiveProfile},
-    gas::{self, GasDensitySettings, GasMix, MAX_GAS_DENSITY, TissuesLoading},
-    loadings_from_dive_profile,
-    mptt::{NUM_TISSUES, TISSUES, XVAL_HE9_040_F32},
-    pressure_unit::{Bar, Pa, Pressure, msw},
 };
 
 use stdc_stm32_rs::{
@@ -33,27 +34,29 @@ use stdc_stm32_rs::{
     constants::barometric::DepthOrAltitude,
 };
 
-use crate::tasks::dive::{
-    DiveTaskState, refresh_display_if_due, update_deco_schedule_if_due, update_dive_time_if_due,
+use crate::{
+    LatestCalculationsState, LatestMeasurements, MEASUREMENT_BUFFER_SIZE,
+    tasks::dive::{
+        DiveTaskState, refresh_display_if_due, update_deco_schedule_if_due, update_dive_time_if_due,
+    },
 };
 
 use super::{POWER_CUT_UNSAFE_FLASH_WRITE, power_cut_mark_safe, power_cut_mark_unsafe};
 use super::{display_set_depth, millis_tim2, millis_tim2_since};
 
 const DIVE_END_TOLERANCE_MILLIS: u32 = 10_000;
-pub const DIVE_GAS_NR: usize = 1;
 
 #[cfg(feature = "lin_exp")]
 pub const DECO_ALGORITHM_TYPE: DecoAlgorithmType = DecoAlgorithmType::LinearExponential;
 #[cfg(not(feature = "lin_exp"))]
 pub const DECO_ALGORITHM_TYPE: DecoAlgorithmType = DecoAlgorithmType::Exponential;
 
-pub struct DiveRuntime<const GAS_NR: usize> {
+pub struct DiveRuntime<const NR_GASES: usize> {
     dive_start_millis: u32,
     surface_pressure: Pa,
     deco_settings: DecoSettings<Pa>,
-    gases: [GasMix<f32>; GAS_NR],
-    loading: TissuesLoading<NUM_TISSUES, Pa>,
+    gases: [GasMix<f32>; NR_GASES],
+    loading: TissuesLoading<{ NUM_TISSUES }, Pa>,
     current_gas_mode_idx: CurrentDiveModeWithInfo,
     last_measurement_millis: u32,
     last_logged_millis: u32,
@@ -64,12 +67,21 @@ pub struct DiveRuntime<const GAS_NR: usize> {
     task_state: DiveTaskState,
 }
 
-pub fn setup_dive_mode<F: Flash, L: ExternalLogger>(
+pub fn setup_dive_mode<F: Flash, L: ExternalLogger, const NR_GASES: usize>(
     flash: &mut F,
     rtc: &Rtc,
     logger: &Mutex<RefCell<L>>,
     surface_pressure: Pa,
-) -> DiveRuntime<DIVE_GAS_NR> {
+    gases: &[GasMix<f32>; NR_GASES],
+) -> DiveRuntime<NR_GASES>
+where
+    [(); NR_GASES * 3]: Sized,
+    [(); 24 + NR_GASES * 3]: Sized,
+    [(); 4 + 24 + NR_GASES * 3]: Sized,
+    [(); 4 + (24 + NR_GASES * 3)]: Sized,
+    [(); 4 + (24 + NR_GASES * 3) + 0]: Sized,
+    [(); 24 + NR_GASES * 3 + 0]: Sized,
+{
     let dive_start_millis = millis_tim2();
 
     let deco_settings = DecoSettings {
@@ -79,11 +91,10 @@ pub fn setup_dive_mode<F: Flash, L: ExternalLogger>(
         max_deco_po2: Bar::new(1.6).to_pa(),
     };
 
-    let gases = [gas::AIR];
     let dive_profile = DiveProfile {
         dive_id: 1,
         max_depth: surface_pressure,
-        gases,
+        gases: *gases,
         measurements: [DiveMeasurement {
             depth: surface_pressure,
             time_ms: dive_start_millis as usize,
@@ -91,8 +102,7 @@ pub fn setup_dive_mode<F: Flash, L: ExternalLogger>(
         }],
     };
 
-    let loading =
-        loadings_from_dive_profile(&TISSUES, &dive_profile, &XVAL_HE9_040_F32, surface_pressure);
+    let loading = loadings_from_dive_profile(&TISSUES, &dive_profile, &MVALUES, surface_pressure);
     let current_gas_mode_idx = CurrentDiveModeWithInfo::OC { gas_idx: 0 };
 
     let (start_date, start_time) = rtc.get_date_time();
@@ -102,7 +112,6 @@ pub fn setup_dive_mode<F: Flash, L: ExternalLogger>(
     let surface_pressure_hpa = surface_pressure.to_hpa().to_f32() as u16;
     let surface_temperature_2 = 0;
     let ascent_rate_agg_seconds = 4;
-    let gas_content = gases;
     let dive_control_data_block = LogDiveControlDataBlock::new(
         start_epoch_seconds,
         surface_interval_seconds,
@@ -110,7 +119,7 @@ pub fn setup_dive_mode<F: Flash, L: ExternalLogger>(
         surface_pressure_hpa,
         surface_temperature_2,
         ascent_rate_agg_seconds,
-        &gas_content,
+        gases,
         DECO_ALGORITHM_TYPE,
     );
 
@@ -122,11 +131,11 @@ pub fn setup_dive_mode<F: Flash, L: ExternalLogger>(
         log_bytes(logger, e.details().as_bytes());
     }
 
-    DiveRuntime {
+    DiveRuntime::<NR_GASES> {
         dive_start_millis,
         surface_pressure,
         deco_settings,
-        gases,
+        gases: *gases,
         loading,
         current_gas_mode_idx,
         last_measurement_millis: dive_start_millis,
@@ -156,7 +165,8 @@ pub fn run_dive_mode_tick<
     display: &mut D,
     ms5849_i2c: &mut MS5849<'_, I, ()>,
     flash: &mut F,
-    latest_measurements: &mut crate::LatestMeasurements,
+    latest_measurements: &mut LatestMeasurements,
+    latest_calculations_state: &mut LatestCalculationsState<{ NUM_TISSUES }, Pa>,
     logger: &Mutex<RefCell<L>>,
 ) -> Option<Pa>
 where
@@ -192,6 +202,7 @@ where
                 pressure,
                 depth,
                 latest_measurements,
+                latest_calculations_state,
                 &mut runtime.last_measurement_millis,
                 measurement_millis,
                 &mut runtime.last_logged_millis,
@@ -242,12 +253,18 @@ where
     None
 }
 
-fn handle_depth_measurement<R: RateAlgorithm<Pa, Pa, u32>, F: Flash, const NR_GASES: usize>(
+fn handle_depth_measurement<
+    R: RateAlgorithm<Pa, Pa, u32>,
+    F: Flash,
+    const NR_GASES: usize,
+    const NUM_TISSUES: usize,
+>(
     flash_log_algorithm: &mut R,
     flash: &mut F,
     pressure: Pa,
     depth: msw,
     latest_measurements: &mut crate::LatestMeasurements,
+    latest_calculations_state: &mut LatestCalculationsState<NUM_TISSUES, Pa>,
     last_measurement_millis: &mut u32,
     measurement_millis: u32,
     last_logged_millis: &mut u32,
@@ -273,15 +290,61 @@ fn handle_depth_measurement<R: RateAlgorithm<Pa, Pa, u32>, F: Flash, const NR_GA
         *max_depth = pressure;
     }
 
-    let temperature = latest_measurements.temperature_for_log();
-    let battery = latest_measurements.battery_for_log();
-
     let current_gas = current_gas_mode_idx.to_fixed_gas(gases, pressure);
     loading.tick(
         time_delta.try_into().unwrap_or(u16::MAX),
         pressure,
         &current_gas,
     );
+    latest_calculations_state.tissue_loadings = loading.clone();
+
+    flash_log_tick(
+        flash,
+        flash_log_algorithm,
+        last_logged_millis,
+        last_logged_pressure,
+        measurement_millis,
+        pressure,
+        &measurement,
+        latest_measurements,
+    );
+
+    // TODO: Decompression Algorithm
+
+    // TODO: O2Tox Calculation
+    {
+        let measurements_since_latest = latest_calculations_state.o2_tox.measurements_since_o2_calc;
+        let nr_measurements = latest_calculations_state
+            .o2_tox
+            .nr_measurementss_since_o2_calc;
+        latest_calculations_state.o2_tox.o2_tox_single = calculate_toxicity_diff(
+            &measurements_since_latest[..nr_measurements],
+            gases,
+            1,
+            &latest_calculations_state.o2_tox.o2_tox_single,
+            &O2ExposureType::Single,
+            O2ToxCalculation::RevisedDHM2025,
+        );
+        latest_calculations_state.o2_tox.measurements_since_o2_calc =
+            [measurements_since_latest[nr_measurements - 1]; MEASUREMENT_BUFFER_SIZE];
+        latest_calculations_state
+            .o2_tox
+            .nr_measurementss_since_o2_calc = 1;
+    }
+}
+
+fn flash_log_tick<R: RateAlgorithm<Pa, Pa, u32>, F: Flash>(
+    flash: &mut F,
+    flash_log_algorithm: &mut R,
+    last_logged_millis: &mut u32,
+    last_logged_pressure: &mut Pa,
+    measurement_millis: u32,
+    pressure: Pa,
+    measurement: &DiveMeasurement<Pa>,
+    latest_measurements: &LatestMeasurements,
+) {
+    let temperature = latest_measurements.temperature_for_log();
+    let battery = latest_measurements.battery_for_log();
 
     let next_log_time_delta = flash_log_algorithm.next_iter(*last_logged_pressure, pressure);
     let next_iter_due_in = next_log_time_delta.map(|n| *last_logged_millis + n);

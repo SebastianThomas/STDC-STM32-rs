@@ -277,9 +277,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.17.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "heapless"
@@ -599,6 +599,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "stdc_diving_algorithms"
+version = "0.1.19"
+source = "git+https://github.com/SebastianThomas/STDC-thalmann.git#531169935aec750617cfbc12556b6462edc4e36c"
+dependencies = [
+ "num",
+]
+
+[[package]]
 name = "stdc_stm32_rs"
 version = "0.1.0"
 dependencies = [
@@ -615,8 +623,8 @@ dependencies = [
  "rtic",
  "rtic-monotonics",
  "rtt-target 0.6.2",
+ "stdc_diving_algorithms",
  "stm32l4xx-hal",
- "thalmann",
 ]
 
 [[package]]
@@ -668,14 +676,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "thalmann"
-version = "0.1.14"
-source = "git+https://github.com/SebastianThomas/STDC-thalmann.git#615f1721096dbc596b3b961d28699ef85dc23d2f"
-dependencies = [
- "num",
 ]
 
 [[package]]

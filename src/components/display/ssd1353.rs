@@ -1,8 +1,8 @@
+use stdc_diving_algorithms::pressure_unit::{Pressure, msw};
 use stm32l4xx_hal::{
     hal::{blocking::spi::Write, digital::v2::OutputPin},
     spi::Spi,
 };
-use thalmann::pressure_unit::{Pressure, msw};
 
 use core::time::Duration;
 

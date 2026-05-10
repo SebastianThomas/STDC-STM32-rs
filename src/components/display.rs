@@ -1,12 +1,11 @@
 use core::time::Duration;
 
-use thalmann::{
-    DINC, calc_deco_schedule,
-    deco_algorithm::DecoSettings,
+use stdc_diving_algorithms::{
+    deco_algorithm::{DecoSettings, calc_deco_schedule},
     dive::StopSchedule,
     gas::{AIR, GasMix, TissuesLoading},
-    mptt,
     pressure_unit::{Pa, Pressure, msw},
+    setup::{self, DINC},
 };
 
 use super::spi_utils::DetailsError;
@@ -24,7 +23,7 @@ pub struct DisplayState {
     pub stop_schedule: Result<StopSchedule<MAX_STOP_NUMS>, &'static str>,
 }
 
-pub const ZERO_LOADING_AIR: TissuesLoading<{ mptt::NUM_TISSUES }, Pa> =
+pub const ZERO_LOADING_AIR: TissuesLoading<{ setup::NUM_TISSUES }, Pa> =
     TissuesLoading::new(msw(0.0).to_pa(), &AIR);
 
 impl const Default for DisplayState {

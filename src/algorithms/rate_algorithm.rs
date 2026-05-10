@@ -1,6 +1,6 @@
 use core::{fmt::Debug, marker::PhantomData, num::NonZeroU32};
 
-use thalmann::pressure_unit::{Pa, Pressure};
+use stdc_diving_algorithms::pressure_unit::{Pa, Pressure};
 const UNIT_SCALE: f32 = 1000.0;
 
 pub trait RateAlgorithm<P, I, Output> {

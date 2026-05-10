@@ -2,12 +2,11 @@ use core::{cell::RefCell, time::Duration};
 
 use cortex_m::interrupt::{Mutex, free};
 use rtt_target::rprintln;
-use thalmann::{
-    calc_deco_schedule,
-    deco_algorithm::DecoSettings,
+use stdc_diving_algorithms::{
+    deco_algorithm::{DecoSettings, calc_deco_schedule},
     gas::{GasMix, TissuesLoading},
-    mptt::NUM_TISSUES,
     pressure_unit::Pa,
+    setup::NUM_TISSUES,
 };
 
 use stdc_stm32_rs::components::spi_utils::DetailsError;
@@ -58,7 +57,7 @@ pub fn update_dive_time_if_due(
 
 pub fn update_deco_schedule_if_due<const NUM_GASES: usize, F: Flash, L: ExternalLogger>(
     state: &mut DiveTaskState,
-    loading: &TissuesLoading<NUM_TISSUES, Pa>,
+    loading: &TissuesLoading<{ NUM_TISSUES }, Pa>,
     gases: &[GasMix<f32>; NUM_GASES],
     deco_settings: &DecoSettings<Pa>,
     flash: &mut F,

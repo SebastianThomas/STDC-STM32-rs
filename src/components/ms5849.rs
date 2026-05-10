@@ -6,7 +6,7 @@ use cortex_m::interrupt::{Mutex, free};
 use rtt_target::rprintln;
 use stm32l4xx_hal::hal::blocking::spi;
 
-use thalmann::pressure_unit::{Bar, Pa, Pressure, msw};
+use stdc_diving_algorithms::pressure_unit::{Bar, Pa, Pressure, msw};
 
 use crate::constants::barometric::{
     ALT_PER_FOOT, DepthOrAltitude, FEET_TO_METERS, KG_M2_FRESH_WATER, RLGM, SURFACE_PA,
@@ -23,8 +23,9 @@ use stm32l4xx_hal::{
     prelude::*,
 };
 
-// pub const MS5849_ADDR: u8 = 0x76;
-pub const MS5849_I2C_ADDR: u8 = 0xEE;
+pub const MS5849_ADDR: u8 = 0x76;
+pub const MS5849_I2C_ADDR: u8 = 0x77;
+// pub const MS5849_I2C_ADDR: u8 = 0xEC;
 // pub const MS5849_RESET: u8 = 0x1E;
 // pub const MS5849_ADC_READ: u8 = 0x00;
 // pub const MS5849_PROM_READ: u8 = 0xA0;
@@ -76,18 +77,16 @@ where
     rprintln!("Scanning I2C bus...");
     log_bytes(b"Scanning I2C bus...");
 
-    for addr in 0x03u8..0x78u8 {
-        // valid 7-bit I2C addresses
-        // Try a zero-length write (common method to ping device)
-        let result = i2c.write(addr, &[]);
-        match result {
+    for addr in 0x08u8..0x78u8 {
+        rprintln!("Trying 0x{:02X}", addr);
+
+        match i2c.write(addr, &[0x00]) {
             Ok(_) => {
-                log_bytes(b"I2C device found at 0x");
-                log_bytes(&[addr, '\n' as u8]);
-                rprintln!("I2C device found at 0x{:02X}", addr);
+                rprintln!("FOUND: 0x{:02X}", addr);
             }
-            // Err(res) => rprintln!("No I2C device found at 0x{:02X}: {:?}", addr, res),
-            Err(_) => (),
+            Err(e) => {
+                rprintln!("0x{:02X}: {:?}", addr, e);
+            }
         }
     }
     rprintln!("Scan complete.");
@@ -97,7 +96,7 @@ fn write_i2c<I: Write>(i2c: &mut I, addr: u8, data: &[u8])
 where
     <I as cortex_m::prelude::_embedded_hal_blocking_i2c_Write>::Error: Debug,
 {
-    rprintln!("Writing to {:#x}: {:?}", addr, data);
+    rprintln!("Writing to {:#x}: {:02x?}", addr, &data);
     if let Err(e) = i2c.write(addr, data) {
         rprintln!("Write failed: {:?}", e);
         panic!("Write failed");
@@ -118,11 +117,11 @@ where
 }
 
 fn wait_us(delay: &Mutex<RefCell<Delay>>, us: u16) {
-    free(|cs| delay.borrow(cs).borrow_mut().delay_ms(us)); // Max conversion time per datasheet
+    free(|cs| delay.borrow(cs).borrow_mut().delay_ms(us));
 }
 
 fn wait_ms(delay: &Mutex<RefCell<Delay>>, ms: u8) {
-    free(|cs| delay.borrow(cs).borrow_mut().delay_ms(ms)); // Max conversion time per datasheet
+    free(|cs| delay.borrow(cs).borrow_mut().delay_ms(ms));
 }
 
 impl<'a, SPI, P> MS5849<'a, SPI, P>
@@ -240,6 +239,7 @@ where
 
         /* Reset and Calibrate */
         // Reset the MS5849, per datasheet
+        // write_i2c(&mut i2c, MS5849_I2C_ADDR, &[]);
         write_i2c(&mut i2c, MS5849_I2C_ADDR, &[MS5849_RESET]);
 
         rprintln!("Reset MS5849 Pressure Sensor, waiting to get ready");
@@ -288,7 +288,7 @@ where
             &[MS5849_CONVERT_D1_8192],
         );
 
-        self.wait_ms(20u8); // Max conversion time per datasheet
+        self.wait_ms(20); // Max conversion time per datasheet
 
         write_i2c(&mut self.interface, MS5849_I2C_ADDR, &[MS5849_ADC_READ_D1]);
 
@@ -303,7 +303,7 @@ where
             &[MS5849_CONVERT_D2_8192],
         );
 
-        self.wait_ms(20u8); // Max conversion time per datasheet
+        self.wait_ms(20); // Max conversion time per datasheet
 
         write_i2c(&mut self.interface, MS5849_I2C_ADDR, &[MS5849_ADC_READ_D2]);
 

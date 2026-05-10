@@ -3,6 +3,12 @@ use core::cell::RefCell;
 use cortex_m::interrupt::Mutex as CmMutex;
 use stm32l4xx_hal::{delay::Delay, i2c::I2c, pac, spi::Spi};
 
+use stdc_diving_algorithms::{
+    dive::DiveMeasurement,
+    gas::{self, TissuesLoading},
+    o2tox::O2ToxicityPercentage,
+    pressure_unit::{AbsPressure, Pa, msw},
+};
 use stdc_stm32_rs::{
     components::{
         MS5849,
@@ -14,7 +20,6 @@ use stdc_stm32_rs::{
     },
     constants::barometric::SURFACE_PA,
 };
-use thalmann::pressure_unit::{Pa, msw};
 
 pub type DelayMutex = CmMutex<RefCell<Delay>>;
 
@@ -154,7 +159,7 @@ pub type BluetoothTx = stm32l4xx_hal::serial::Tx<pac::USART3>;
 pub type BluetoothRx = stm32l4xx_hal::serial::Rx<pac::USART3>;
 pub type BluetoothModule = UartBluetoothModule<BluetoothTx, BluetoothRx, Pb2InputPullDown>;
 
-pub type SurfacePressure = thalmann::pressure_unit::Pa;
+pub type SurfacePressure = Pa;
 pub const DEFAULT_SURFACE_PRESSURE: SurfacePressure = SURFACE_PA;
 
 #[derive(Clone, Copy, Debug)]
@@ -236,6 +241,43 @@ impl LatestMeasurements {
                 }
             }
             None => 0,
+        }
+    }
+}
+
+pub const MEASUREMENT_BUFFER_SIZE: usize = 20;
+
+#[derive(Clone, Debug)]
+pub struct LatestCalculationsState<const NUM_TISSUES: usize, P>
+where
+    P: const AbsPressure,
+{
+    pub tissue_loadings: TissuesLoading<NUM_TISSUES, P>,
+    pub o2_tox: LatestO2CalculationsState,
+}
+
+#[derive(Clone, Debug)]
+pub struct LatestO2CalculationsState {
+    pub o2_tox_single: O2ToxicityPercentage,
+    pub o2_tox_daily: O2ToxicityPercentage,
+    pub measurements_since_o2_calc: [DiveMeasurement<Pa>; MEASUREMENT_BUFFER_SIZE],
+    pub nr_measurementss_since_o2_calc: usize,
+}
+
+impl<const NUM_TISSUES: usize, P: const AbsPressure> LatestCalculationsState<NUM_TISSUES, P> {
+    pub fn new(ambient: P, daily: Option<O2ToxicityPercentage>) -> Self {
+        Self {
+            o2_tox: LatestO2CalculationsState {
+                o2_tox_single: O2ToxicityPercentage::new(0.0, 0.0),
+                o2_tox_daily: daily.unwrap_or_else(|| O2ToxicityPercentage::new(0.0, 0.0)),
+                measurements_since_o2_calc: [DiveMeasurement {
+                    time_ms: usize::MAX,
+                    depth: Pa::new(0.0),
+                    gas: usize::MAX,
+                }; MEASUREMENT_BUFFER_SIZE],
+                nr_measurementss_since_o2_calc: 0,
+            },
+            tissue_loadings: TissuesLoading::new(ambient, &gas::AIR),
         }
     }
 }

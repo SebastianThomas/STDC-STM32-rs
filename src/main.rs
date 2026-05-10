@@ -35,7 +35,6 @@ use stdc_stm32_rs::{
     components::{
         MS5849,
         battery_status::{BatteryStatusI2C, Max17262Variant},
-        display::LedDisplay,
         flash::{Flash, SpiFlash},
         uart_log::{ExternalLogger, UartLogger},
     },
@@ -46,6 +45,10 @@ mod modes;
 mod tasks;
 mod types;
 
+use stdc_diving_algorithms::{
+    gas::{self, GasMix},
+    pressure_unit::Pressure,
+};
 pub use types::*;
 
 const ENABLE_BLUETOOTH: bool = true;
@@ -56,6 +59,8 @@ const INITIAL_FLASH_ADDRESS: u32 = 1 << 21;
 const STOP2_SURFACE_SLEEP_SECONDS: u32 = 2;
 const BATTERY_UPDATE_INTERVAL_MILLIS: u32 = 30_000;
 const BLUETOOTH_TASK_DELAY_MILLIS: u64 = 200;
+
+const GASES: [GasMix<f32>; 1] = [gas::AIR];
 
 stm32_tim5_monotonic!(Mono, 1_000);
 
@@ -69,7 +74,8 @@ static POWER_CUT_RED_INDICATOR: CmMutex<RefCell<Option<Pc9Output>>> =
 
 #[rtic::app(device = stm32l4xx_hal::pac, peripherals = true, dispatchers = [EXTI0])]
 mod app {
-    use stdc_stm32_rs::components::display::SpiDisplay;
+    use stdc_diving_algorithms::{pressure_unit::Pa, setup::NUM_TISSUES};
+    use stdc_stm32_rs::components::display::{LedDisplay, SpiDisplay};
 
     use super::*;
 
@@ -82,7 +88,7 @@ mod app {
     struct Local {
         mode: AppMode,
         dive_mode_indicator: Pc8Output,
-        mode_surface_pressure: thalmann::pressure_unit::Pa,
+        mode_surface_pressure: Pa,
         surface_mode_state: modes::surface::SurfaceModeState,
         bluetooth_mode_state: modes::bluetooth::BluetoothModeState,
         rtc: Rtc,
@@ -97,7 +103,8 @@ mod app {
         bluetooth_hw_resources: Option<(Pb10Usart3Tx, Pb11Usart3Rx, Pb2InputPullDown)>,
         bluetooth: Option<BluetoothModule>,
         bluetooth_initialized: bool,
-        dive_runtime: Option<modes::dive::DiveRuntime<{ crate::modes::dive::DIVE_GAS_NR }>>,
+        dive_runtime: Option<modes::dive::DiveRuntime<{ GASES.len() }>>,
+        latest_calculations_state: LatestCalculationsState<{ NUM_TISSUES }, Pa>,
     }
 
     #[init]
@@ -313,7 +320,10 @@ mod app {
             let _ = flash.set_pos(new_pos);
             modes::power_cut_mark_safe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
         } else {
-            let _ = flash.set_pos(cur_addr.unwrap());
+            let cur_addr = cur_addr.unwrap();
+            rprintln!("Current Flash Address: {}", cur_addr);
+            rprintln!("Check: {}", cur_addr - (1 << 21));
+            let _ = flash.set_pos(cur_addr);
         }
         modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
         let _ = flash.write(&SERIAL_NUMBER);
@@ -322,6 +332,10 @@ mod app {
 
         log_str(logger, "Flash write complete");
 
+        let mut pressure_sensor_enable_pin = gpiob
+            .pb8
+            .into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper);
+        let _ = pressure_sensor_enable_pin.set_high();
         let scl = gpiob.pb6.into_alternate_open_drain(
             &mut gpiob.moder,
             &mut gpiob.otyper,
@@ -338,10 +352,29 @@ mod app {
             i2c::Config::new(100.kHz(), clocks),
             &mut apb1r1,
         );
-        let ms5849_i2c: SensorMs5849<'static> =
+        let mut ms5849_i2c: SensorMs5849<'static> =
             MS5849::new_i2c(sensor_i2c, delay, sensor_log_bytes);
 
         log_str(logger, "Pressure Sensor set up");
+
+        ms5849_i2c.read_i2c();
+        let start_pressure = match ms5849_i2c.current_pressure_pa() {
+            Some(p) => {
+                let temp = ms5849_i2c.temperature();
+                log_str(logger, "Got first result from Pressure Sensor");
+                rprintln!(
+                    "Start Pressure: {} Pa, {} msw, Temperature: {}",
+                    p.to_f32(),
+                    p.to_msw().to_f32(),
+                    temp.unwrap(),
+                );
+                p
+            }
+            None => {
+                rprintln!("Got error while measuring pressure");
+                DEFAULT_SURFACE_PRESSURE
+            }
+        };
 
         let scl = gpioc.pc0.into_alternate_open_drain(
             &mut gpioc.moder,
@@ -364,7 +397,7 @@ mod app {
             Max17262Variant::R,
         );
 
-        log_str(logger, "Battery Status");
+        log_str(logger, "Battery Status set up");
 
         let bluetooth_tx_ind = gpiob
             .pb2
@@ -397,7 +430,7 @@ mod app {
             Local {
                 mode: AppMode::Bluetooth,
                 dive_mode_indicator,
-                mode_surface_pressure: DEFAULT_SURFACE_PRESSURE,
+                mode_surface_pressure: start_pressure,
                 surface_mode_state: modes::surface::SurfaceModeState::new(),
                 bluetooth_mode_state,
                 rtc,
@@ -413,6 +446,7 @@ mod app {
                 bluetooth: None,
                 bluetooth_initialized: false,
                 dive_runtime: None,
+                latest_calculations_state: LatestCalculationsState::new(start_pressure, None),
             },
         )
     }
@@ -441,7 +475,8 @@ mod app {
         bluetooth_hw_resources,
         bluetooth,
         bluetooth_initialized,
-        dive_runtime
+        dive_runtime,
+        latest_calculations_state,
     ])]
     async fn task_mode_tick(mut cx: task_mode_tick::Context) {
         sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
@@ -467,6 +502,7 @@ mod app {
                             cx.local.rtc,
                             cx.local.logger,
                             surface_pressure,
+                            &GASES,
                         ));
                     }
                     Some(SurfaceModeExit::_Bluetooth(surface_pressure)) => {
@@ -522,6 +558,7 @@ mod app {
                         cx.local.ms5849_i2c,
                         cx.local.flash,
                         latest_measurements,
+                        &mut cx.local.latest_calculations_state,
                         cx.local.logger,
                     )
                 });
@@ -585,7 +622,7 @@ fn init_clocks_delay(
     syst: SYST,
 ) -> (Clocks, CmMutex<RefCell<Delay>>) {
     let clocks = cfgr
-        .sysclk_with_pll(32.MHz(), PllConfig::new(1, 8, PllDivider::Div4))
+        .sysclk_with_pll(32.MHz(), PllConfig::new(2, 8, PllDivider::Div8))
         .pclk1(32.MHz())
         .pclk2(32.MHz())
         .freeze(acr, pwr);

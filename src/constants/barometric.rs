@@ -1,4 +1,4 @@
-use thalmann::pressure_unit::{Bar, Pa, Pressure, hPa, kPa, msw};
+use stdc_diving_algorithms::pressure_unit::{Bar, Pa, Pressure, hPa, kPa, msw};
 
 pub const SURFACE_PA: Pa = Pa::new(101325.0);
 pub const SURFACE_HPA: hPa = SURFACE_PA.to_hpa();

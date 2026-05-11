@@ -414,8 +414,8 @@ mod app {
         // Active-low indicator: start with LED off until Dive mode is entered.
         let _ = dive_mode_indicator.set_high();
 
-        let _ = task_battery_update::spawn();
         let _ = task_mode_tick::spawn();
+        let _ = task_battery_update::spawn();
 
         let mut bluetooth_mode_state = modes::bluetooth::BluetoothModeState::new();
         bluetooth_mode_state.on_enter();
@@ -454,6 +454,7 @@ mod app {
     #[idle]
     fn idle(_: idle::Context) -> ! {
         loop {
+            rprintln!("TODO: Remove me, Still Running");
             cortex_m::asm::wfi();
         }
     }
@@ -480,6 +481,7 @@ mod app {
     ])]
     async fn task_mode_tick(mut cx: task_mode_tick::Context) {
         sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
+        rprintln!("Task Mode Tick");
 
         match *cx.local.mode {
             AppMode::Surface => {
@@ -580,10 +582,14 @@ mod app {
 
     #[task(priority = 1, shared = [latest_measurements], local = [battery_status])]
     async fn task_battery_update(mut cx: task_battery_update::Context) {
+        rprintln!("Task Battery Update Tick");
         cx.shared.latest_measurements.lock(|latest_measurements| {
+            rprintln!("Critical Section Shared Latest Measurements start");
             tasks::battery::calc_battery_status(cx.local.battery_status, latest_measurements);
+            rprintln!("Critical Section Shared Latest Measurements end");
         });
 
+        rprintln!("Await next update");
         tasks::battery::wait_for_next_battery_update().await;
         let _ = task_battery_update::spawn();
     }

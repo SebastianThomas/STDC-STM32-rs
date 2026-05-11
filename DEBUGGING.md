@@ -12,7 +12,6 @@ With the current `Embed.toml`, this will:
 
 - build and flash the firmware,
 - reset the target,
-- halt after reset,
 - open a GDB server on `127.0.0.1:1337`.
 
 ## 2) Connect GDB from a second terminal

@@ -15,6 +15,9 @@ pub mod components;
 pub mod protocols;
 
 #[cfg(all(test, not(target_os = "none")))]
+#[path = "components/battery_status/battery_status_values.rs"]
+pub mod battery_status_values;
+#[cfg(all(test, not(target_os = "none")))]
 #[path = "components/dive_log.rs"]
 pub mod dive_log_host;
 

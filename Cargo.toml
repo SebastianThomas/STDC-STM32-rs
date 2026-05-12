@@ -38,3 +38,4 @@ test = false
 [features]
 default = ["lin_exp"]
 lin_exp = ["stdc_diving_algorithms/lin_exp"]
+online_benchmarking = []

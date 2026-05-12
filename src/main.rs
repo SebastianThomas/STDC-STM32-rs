@@ -30,6 +30,7 @@ use stm32l4xx_hal::{
 };
 
 use stdc_stm32_rs::{
+    benchmarking,
     components::{
         MS5849,
         battery_status::{BatteryStatusI2C, Max17262Variant},
@@ -110,8 +111,10 @@ mod app {
         rtt_init_print!();
         rprintln!("Booting..");
 
-        let core = cx.core;
+        let mut core = cx.core;
         let dp = cx.device;
+
+        benchmarking::enable_cycle_counter(&mut core);
 
         let mut rcc = dp.RCC.constrain();
         let mut flash_pac = dp.FLASH.constrain();
@@ -456,7 +459,7 @@ mod app {
     #[idle]
     fn idle(_: idle::Context) -> ! {
         loop {
-            rprintln!("TODO: Remove me, Still Running");
+            benchmarking::record_wfi();
             cortex_m::asm::wfi();
         }
     }
@@ -487,21 +490,24 @@ mod app {
 
         match *cx.local.mode {
             AppMode::Surface => {
-                rprintln!("Locking shared latest measurements");
-                let surface_exit = cx.shared.latest_measurements.lock(|latest_measurements| {
-                    rprintln!("Enter latest measurements");
-                    let mode = modes::surface::run_surface_mode_tick(
-                        cx.local.surface_mode_state,
-                        cx.local.ms5849_i2c,
-                        cx.local.flash,
-                        latest_measurements,
-                        cx.local.logger,
-                    );
-                    rprintln!("Exit latest measurements");
-                    modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
-                    sync_power_cut_indicator();
-                    mode
+                let (surface_exit, sample) = benchmarking::measure("task.surface.tick", || {
+                    rprintln!("Locking shared latest measurements");
+                    cx.shared.latest_measurements.lock(|latest_measurements| {
+                        rprintln!("Enter latest measurements");
+                        let mode = modes::surface::run_surface_mode_tick(
+                            cx.local.surface_mode_state,
+                            cx.local.ms5849_i2c,
+                            cx.local.flash,
+                            latest_measurements,
+                            cx.local.logger,
+                        );
+                        rprintln!("Exit latest measurements");
+                        mode
+                    })
                 });
+                benchmarking::log_sample(&sample);
+                modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
+                sync_power_cut_indicator();
                 rprintln!("Finished Surface Tick with exit mode {:?}", surface_exit);
 
                 match surface_exit {
@@ -529,7 +535,12 @@ mod app {
                         // enter_stop2_for_surface(cx.local.rtc);
                         // let _ = wake_reinit::spawn();
                         // return; // Return early instead of respawning self
-                        Mono::delay(200u64.millis()).await;
+                        let (_, sample) = benchmarking::measure_async(
+                            "task.surface.delay",
+                            Mono::delay(200u64.millis()),
+                        )
+                        .await;
+                        benchmarking::log_sample(&sample);
                     }
                 }
             }
@@ -554,7 +565,12 @@ mod app {
                 {
                     transition_into_surface(cx.local.mode, cx.local.surface_mode_state);
                 } else {
-                    Mono::delay(BLUETOOTH_TASK_DELAY_MILLIS.millis()).await;
+                    let (_, sample) = benchmarking::measure_async(
+                        "task.bluetooth.delay",
+                        Mono::delay(BLUETOOTH_TASK_DELAY_MILLIS.millis()),
+                    )
+                    .await;
+                    benchmarking::log_sample(&sample);
                 }
             }
             AppMode::Dive => {
@@ -565,24 +581,32 @@ mod app {
                     return;
                 };
 
-                let dive_exit = cx.shared.latest_measurements.lock(|latest_measurements| {
-                    modes::dive::run_dive_mode_tick(
-                        runtime,
-                        cx.local.display,
-                        cx.local.ms5849_i2c,
-                        cx.local.flash,
-                        latest_measurements,
-                        &mut cx.local.latest_calculations_state,
-                        cx.local.logger,
-                    )
+                let (dive_exit, sample) = benchmarking::measure("task.dive.tick", || {
+                    cx.shared.latest_measurements.lock(|latest_measurements| {
+                        modes::dive::run_dive_mode_tick(
+                            runtime,
+                            cx.local.display,
+                            cx.local.ms5849_i2c,
+                            cx.local.flash,
+                            latest_measurements,
+                            &mut cx.local.latest_calculations_state,
+                            cx.local.logger,
+                        )
+                    })
                 });
+                benchmarking::log_sample(&sample);
 
                 if let Some(surface_pressure) = dive_exit {
                     *cx.local.mode_surface_pressure = surface_pressure;
                     *cx.local.dive_runtime = None;
                     transition_into_surface(cx.local.mode, cx.local.surface_mode_state);
                 } else {
-                    Mono::delay(50_u64.millis()).await;
+                    let (_, sample) = benchmarking::measure_async(
+                        "task.dive.delay",
+                        Mono::delay(50_u64.millis()),
+                    )
+                    .await;
+                    benchmarking::log_sample(&sample);
                 }
             }
         }

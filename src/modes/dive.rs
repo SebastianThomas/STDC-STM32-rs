@@ -17,6 +17,7 @@ use stm32l4xx_hal::{
 };
 
 use stdc_stm32_rs::{
+    benchmarking,
     algorithms::{
         helpers::datetime_to_epoch_seconds,
         rate_algorithm::{DynamicDiffAimdRateAlgorithm, RateAlgorithm},
@@ -274,45 +275,47 @@ fn handle_depth_measurement<
     gases: &[GasMix<f32>; NR_GASES],
     current_gas_mode_idx: &CurrentDiveModeWithInfo,
 ) {
-    rprintln!("Measuring Pressure: {:?}, depth: {:?}", pressure, depth);
-    display_set_depth(depth);
+    let (_, sample) = benchmarking::measure("dive.rate_and_logging", || {
+        rprintln!("Measuring Pressure: {:?}, depth: {:?}", pressure, depth);
+        display_set_depth(depth);
 
-    let measurement = DiveMeasurement {
-        time_ms: measurement_millis as usize,
-        depth: pressure,
-        gas: current_gas_mode_idx.to_log_byte() as usize,
-    };
+        let measurement = DiveMeasurement {
+            time_ms: measurement_millis as usize,
+            depth: pressure,
+            gas: current_gas_mode_idx.to_log_byte() as usize,
+        };
 
-    let time_delta = measurement_millis - *last_measurement_millis;
-    *last_measurement_millis = measurement_millis;
+        let time_delta = measurement_millis - *last_measurement_millis;
+        *last_measurement_millis = measurement_millis;
 
-    if *max_depth < pressure {
-        *max_depth = pressure;
-    }
+        if *max_depth < pressure {
+            *max_depth = pressure;
+        }
 
-    let current_gas = current_gas_mode_idx.to_fixed_gas(gases, pressure);
-    loading.tick(
-        time_delta.try_into().unwrap_or(u16::MAX),
-        pressure,
-        &current_gas,
-    );
-    latest_calculations_state.tissue_loadings = loading.clone();
+        let current_gas = current_gas_mode_idx.to_fixed_gas(gases, pressure);
+        loading.tick(
+            time_delta.try_into().unwrap_or(u16::MAX),
+            pressure,
+            &current_gas,
+        );
+        latest_calculations_state.tissue_loadings = loading.clone();
 
-    flash_log_tick(
-        flash,
-        flash_log_algorithm,
-        last_logged_millis,
-        last_logged_pressure,
-        measurement_millis,
-        pressure,
-        &measurement,
-        latest_measurements,
-    );
+        flash_log_tick(
+            flash,
+            flash_log_algorithm,
+            last_logged_millis,
+            last_logged_pressure,
+            measurement_millis,
+            pressure,
+            &measurement,
+            latest_measurements,
+        );
+    });
+    benchmarking::log_sample(&sample);
 
-    // TODO: Decompression Algorithm
+    // TODO: Decompression Algorithm?
 
-    // TODO: O2Tox Calculation
-    {
+    let (_, sample) = benchmarking::measure("dive.o2_tox", || {
         let measurements_since_latest = latest_calculations_state.o2_tox.measurements_since_o2_calc;
         let nr_measurements = latest_calculations_state
             .o2_tox
@@ -330,7 +333,8 @@ fn handle_depth_measurement<
         latest_calculations_state
             .o2_tox
             .nr_measurementss_since_o2_calc = 1;
-    }
+    });
+    benchmarking::log_sample(&sample);
 }
 
 fn flash_log_tick<R: RateAlgorithm<Pa, Pa, u32>, F: Flash>(

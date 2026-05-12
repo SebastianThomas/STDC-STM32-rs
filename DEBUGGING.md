@@ -2,6 +2,16 @@
 
 This project is configured to debug with `cargo embed` using `Embed.toml`.
 
+For the common workflows, use `just`:
+
+- `just c` for host and embedded checks
+- `just b` for embedded build
+- `just b-bench` for embedded build with online benchmarking enabled
+- `just t` for host tests
+- `just bench` for the host benchmark suites
+- `just embed` for flashing and RTT/GDB setup
+- `just embed-bench` for flashing with online benchmarking enabled
+
 ## 1) Start probe-rs session
 
 ```bash

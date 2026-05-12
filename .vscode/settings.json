@@ -7,6 +7,34 @@
     "/^cargo check 2>&1 \\| head -100$/": {
       "approve": true,
       "matchCommandLine": true
+    },
+    "/^cargo check --target x86_64-apple-darwin --lib --tests$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "/^cargo check --target thumbv7em-none-eabihf --bin stdc_stm32_rs --lib$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "/^cargo check --target x86_64-apple-darwin --lib --tests && cargo check --target thumbv7em-none-eabihf --bin stdc_stm32_rs --lib$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "/^just --list$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "/^cargo check --target x86_64-apple-darwin --lib --tests && cargo check --target thumbv7em-none-eabihf --bin stdc_stm32_rs --lib && cargo check --features online_benchmarking --target thumbv7em-none-eabihf --bin stdc_stm32_rs --lib$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "/^cargo test --target x86_64-apple-darwin --lib --tests benchmark_tests -- --nocapture$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "/^cargo test --target x86_64-apple-darwin --lib --tests benchmark_tests -- --nocapture --test-threads=1$/": {
+      "approve": true,
+      "matchCommandLine": true
     }
   }
 }

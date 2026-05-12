@@ -199,3 +199,6 @@ mod bluetooth_serialization_tests {
         assert!(LogPointData::from_bytes(&bytes).is_none());
     }
 }
+
+#[cfg(all(test, not(target_os = "none")))]
+mod benchmark_tests;

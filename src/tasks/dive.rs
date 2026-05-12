@@ -9,6 +9,7 @@ use stdc_diving_algorithms::{
     setup::NUM_TISSUES,
 };
 
+use stdc_stm32_rs::benchmarking;
 use stdc_stm32_rs::components::spi_utils::DetailsError;
 use stdc_stm32_rs::components::{display::LedDisplay, flash::Flash, uart_log::ExternalLogger};
 
@@ -77,7 +78,12 @@ where
 
     state.last_deco_update_millis = millis_tim2();
 
-    match calc_deco_schedule(loading, gases, deco_settings) {
+    let (result, sample) = benchmarking::measure("dive.deco_schedule", || {
+        calc_deco_schedule(loading, gases, deco_settings)
+    });
+    benchmarking::log_sample(&sample);
+
+    match result {
         Ok(stops) => {
             display_set_stop_schedule(stops);
             log_bytes(logger, b"Dive deco schedule updated");
@@ -102,7 +108,10 @@ pub fn refresh_display_if_due<D: LedDisplay, L: ExternalLogger>(
 
     state.last_display_refresh_millis = millis_tim2();
 
-    match display_refresh(display) {
+    let (result, sample) = benchmarking::measure("dive.display_refresh", || display_refresh(display));
+    benchmarking::log_sample(&sample);
+
+    match result {
         Ok(_) => true,
         Err(e) => {
             log_bytes(logger, b"Failed refreshing display.");

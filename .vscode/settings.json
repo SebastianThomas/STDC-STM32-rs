@@ -2,5 +2,11 @@
   "rust-analyzer.cargo.allTargets": false,
   "rust-analyzer.check.allTargets": false,
   "rust-analyzer.cargo.target": "thumbv7em-none-eabihf",
-  "rust-analyzer.check.command": "check"
+  "rust-analyzer.check.command": "check",
+  "chat.tools.terminal.autoApprove": {
+    "/^cargo check 2>&1 \\| head -100$/": {
+      "approve": true,
+      "matchCommandLine": true
+    }
+  }
 }

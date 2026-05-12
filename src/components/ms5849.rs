@@ -57,6 +57,23 @@ impl SensorConfiguration {
 
 #[allow(non_camel_case_types)]
 #[allow(non_snake_case)]
+/// MS5849 Pressure Sensor Driver
+/// 
+/// The MS5849 has an interrupt pin (INT/PB5) that signals when conversion is complete.
+/// When a conversion is started with CONVERT_D1_8192 or CONVERT_D2_8192, the sensor
+/// performs the ADC conversion and pulls the interrupt pin low when ready (~20ms max).
+/// 
+/// **Current Implementation**: Polling-based with fixed delays (20ms per conversion).
+/// **Interrupt-Based Alternative**: 
+/// - Monitor PB5 EXTI for falling edge (conversion complete)
+/// - Eliminates fixed sleep delays (~40ms total, currently)
+/// - Enables more responsive dive computer, especially during rapid depth changes
+/// - Requires: EXTI interrupt handler + async state machine
+/// 
+/// The interrupt signal allows you to:
+/// 1. Start both D1 and D2 conversions without waiting
+/// 2. Use an EXTI interrupt to receive notification when data is ready
+/// 3. Reduce CPU utilization and sleep time
 pub struct MS5849<'a, INTERFACE, P> {
     interface: INTERFACE,
     config: SensorConfiguration,
@@ -167,15 +184,15 @@ where
 
         rprintln!("Calibration data: {:?}", cal);
 
-        // TODO: Verify that data is correct with CRC
-        // let crc_read: u8 = (cal[0] >> 12) as u8;
-        // let crc_calculated: u8 = crc4(&mut cal);
+        // Verify calibration data with CRC4
+        let crc_read: u8 = (cal[0] >> 12) as u8;
+        let crc_calculated: u8 = Self::crc4(&cal);
 
-        // if crc_calculated != crc_read {
-        //     // CRC fail
-        //     rprintln!("CRC failed");
-        //     panic!("CRC failed");
-        // }
+        if crc_calculated != crc_read {
+            rprintln!("CRC4 failed: read=0x{:X}, calculated=0x{:X}", crc_read, crc_calculated);
+            panic!("Calibration CRC4 verification failed");
+        }
+        rprintln!("CRC4 validation passed (0x{:X})", crc_read);
 
         let config = SensorConfiguration::new(KG_M2_FRESH_WATER);
         MS5849 {
@@ -274,15 +291,15 @@ where
             panic!("Pressure Sensor broken or not compatible.");
         }
 
-        // TODO: Verify that data is correct with CRC
-        // let crc_read: u8 = (cal[0] >> 12) as u8;
-        // let crc_calculated: u8 = crc4(&mut cal);
+        // Verify calibration data with CRC4
+        let crc_read: u8 = (cal[0] >> 12) as u8;
+        let crc_calculated: u8 = Self::crc4(&cal);
 
-        // if crc_calculated != crc_read {
-        //     // CRC fail
-        //     rprintln!("CRC failed");
-        //     panic!("CRC failed");
-        // }
+        if crc_calculated != crc_read {
+            rprintln!("CRC4 failed: read=0x{:X}, calculated=0x{:X}", crc_read, crc_calculated);
+            panic!("Calibration CRC4 verification failed");
+        }
+        rprintln!("CRC4 validation passed (0x{:X})", crc_read);
 
         let config = SensorConfiguration::new(KG_M2_FRESH_WATER);
         MS5849 {
@@ -309,7 +326,7 @@ where
         self.wait_ms(20); // Max conversion time per datasheet
 
         let buf: [u8; 3] = write_read_i2c(&mut self.interface, MS5849_I2C_ADDR, MS5849_ADC_READ_D1);
-        let d1_pres = (buf[0] as u32) << 16 | (buf[0] as u32) << 8 | buf[0] as u32;
+        let d1_pres = (buf[0] as u32) << 16 | (buf[1] as u32) << 8 | buf[2] as u32;
         self.D1_pres = Some(d1_pres);
 
         // Request D2 conversion
@@ -322,7 +339,7 @@ where
         self.wait_ms(20); // Max conversion time per datasheet
 
         let buf: [u8; 3] = write_read_i2c(&mut self.interface, MS5849_I2C_ADDR, MS5849_ADC_READ_D2);
-        let d2_temp = (buf[0] as u32) << 16 | (buf[0] as u32) << 8 | buf[0] as u32;
+        let d2_temp = (buf[0] as u32) << 16 | (buf[1] as u32) << 8 | buf[2] as u32;
         self.D2_temp = Some(d2_temp);
 
         self.calculate();
@@ -401,26 +418,42 @@ impl<'a, I, P> MS5849<'a, I, P> {
     }
 }
 
-// fn crc4(n_prom: &mut [u16; 8]) -> u8 {
-//     let mut n_rem = 0 as u16;
+impl<'a, I, P> MS5849<'a, I, P> {
+    /// Calculate 4-bit CRC for MS5849 calibration data.
+    /// Per MS5849 datasheet, the CRC is computed over the calibration coefficients.
+    /// The CRC polynomial is 0x3 (x^4 + x^3 + 1).
+    /// The CRC value is stored in the upper 4 bits of C[0].
+    fn crc4(n_prom: &[u16; 10]) -> u8 {
+        let mut n_rem: u16 = 0;
+        let mut coeff_array: [u16; 8] = [0; 8];
 
-//     n_prom[0] = (n_prom[0]) & 0x0FFF;
-//     n_prom[7] = 0;
+        // Copy first 8 coefficients and mask CRC from C[0]
+        coeff_array[0] = n_prom[0] & 0x0FFF;
+        for i in 1..8 {
+            coeff_array[i] = n_prom[i];
+        }
 
-//     for i in 0..16 {
-//         if i % 2 == 1 {
-//             n_rem ^= ((n_prom[i >> 1]) & 0x00FF) as u16;
-//         } else {
-//             n_rem ^= (n_prom[i >> 1] >> 8) as u16;
-//         }
-//         for _n_bit in (1..=8).rev() {
-//             if n_rem & 0x8000 != 0 {
-//                 n_rem = (n_rem << 1) ^ 0x3000;
-//             } else {
-//                 n_rem = n_rem << 1;
-//             }
-//         }
-//     }
-//     n_rem = (n_rem >> 12) & 0x000F;
-//     return (n_rem ^ 0x00).try_into().unwrap();
-// }
+        // CRC calculation: 16 iterations, 2 bytes per iteration
+        for i in 0..16 {
+            // Extract byte (MSB on even iterations, LSB on odd)
+            let byte = if i % 2 == 1 {
+                (coeff_array[i >> 1] & 0x00FF) as u16
+            } else {
+                (coeff_array[i >> 1] >> 8) as u16
+            };
+            n_rem ^= byte;
+
+            // Process each of 8 bits
+            for _n_bit in (1..=8).rev() {
+                if n_rem & 0x8000 != 0 {
+                    n_rem = (n_rem << 1) ^ 0x3000;
+                } else {
+                    n_rem = n_rem << 1;
+                }
+            }
+        }
+
+        // Return upper 4 bits of remainder
+        ((n_rem >> 12) & 0x000F) as u8
+    }
+}

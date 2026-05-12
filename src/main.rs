@@ -525,6 +525,7 @@ mod app {
                         rprintln!("Going to sleep");
                         sync_power_cut_indicator();
                         sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
+                        // TODO: Reenable STOP2 once it works with delay
                         // enter_stop2_for_surface(cx.local.rtc);
                         // let _ = wake_reinit::spawn();
                         // return; // Return early instead of respawning self

@@ -1,7 +1,8 @@
 mod battery_status_values;
+pub use battery_status_values::Max17262Variant;
 use battery_status_values::*;
 
-use core::cell::RefCell;
+use core::{cell::RefCell, fmt::Debug};
 
 use cortex_m::interrupt::{Mutex, free};
 use rtt_target::rprintln;
@@ -41,28 +42,6 @@ const REG_ICHG_TERM: u8 = 0x1E;
 const REG_VEMPTY: u8 = 0x3A;
 const REG_MODEL_CFG: u8 = 0xDB;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Max17262Variant {
-    R,
-    H,
-}
-
-impl Max17262Variant {
-    fn capacity_lsb_mah(self) -> f32 {
-        match self {
-            Self::R => 0.5,
-            Self::H => 0.1667,
-        }
-    }
-
-    fn current_lsb_ma(self) -> f32 {
-        match self {
-            Self::R => 0.15625,
-            Self::H => 0.052083,
-        }
-    }
-}
-
 pub trait BatteryStatus {
     fn read_snapshot(&mut self) -> Result<BatterySnapshot, BatteryStatusError>;
 }
@@ -93,13 +72,19 @@ pub struct BatteryStatusI2C<'a, I> {
     variant: Max17262Variant,
 }
 
-impl<I: Write + WriteRead> BatteryStatus for BatteryStatusI2C<'_, I> {
+impl<I: Write + WriteRead> BatteryStatus for BatteryStatusI2C<'_, I>
+where
+    <I as WriteRead>::Error: Debug,
+{
     fn read_snapshot(&mut self) -> Result<BatterySnapshot, BatteryStatusError> {
         self.read_snapshot()
     }
 }
 
-impl<'a, I: Write + WriteRead> BatteryStatusI2C<'a, I> {
+impl<'a, I: Write + WriteRead> BatteryStatusI2C<'a, I>
+where
+    <I as WriteRead>::Error: Debug,
+{
     pub fn new(i2c: I, delay: &'a Mutex<RefCell<Delay>>, variant: Max17262Variant) -> Self {
         Self::with_address(i2c, delay, MAX17262_I2C_ADDRESS, variant)
     }
@@ -124,7 +109,12 @@ impl<'a, I: Write + WriteRead> BatteryStatusI2C<'a, I> {
     }
 
     fn is_ready_for_3_2(&mut self) -> bool {
+        rprintln!("Read Status Register");
         let status_reg = self.read_register_u16(REG_STATUS);
+        rprintln!(
+            "Finished Reading Status Register: {:08b}",
+            status_reg.unwrap_or(0xFFFF)
+        );
         let status_por = status_reg.map(|s| s & 0x0002);
         if let Ok(0) = status_por {
             return true;
@@ -137,8 +127,9 @@ impl<'a, I: Write + WriteRead> BatteryStatusI2C<'a, I> {
 
     // Initialization according to https://www.analog.com/media/en/technical-documentation/user-guides/modelgauge-m5-host-side-software-implementation-guide.pdf
     fn create_init(&mut self) -> Result<(), BatteryStatusError> {
+        rprintln!("Initialize Battery Status IC");
         if self.is_ready_for_3_2() {
-            return self.init_step_3();
+            return self.init_step_3(true);
         }
         self.init_step_1()
     }
@@ -158,15 +149,18 @@ impl<'a, I: Write + WriteRead> BatteryStatusI2C<'a, I> {
 
     fn init_step_2(&mut self) -> Result<(), BatteryStatusError> {
         // Exit Hibernate Mode
+        rprintln!("Exit Hibernate Mode");
         let initial_hib_cfg = self.read_register_u16(REG_HIB_CFG)?;
         self.write_register_u16(REG_COMMAND, 0x0090)?;
         self.write_register_u16(REG_HIB_CFG, 0x0000)?;
         self.write_register_u16(REG_COMMAND, 0x0000)?;
         // EZ Config
+        rprintln!("EZ Config");
         self.write_register_u16(REG_DESIGN_CAP, DESIGN_CAP)?;
         self.write_register_u16(REG_ICHG_TERM, ICHG_TERM)?;
         self.write_register_u16(REG_VEMPTY, VEMPTY)?;
         // Model Config
+        rprintln!("Model Config");
         let modelcfg = if CHARGE_VOLTAGE > 4.275 {
             0x8400
         } else {
@@ -176,20 +170,25 @@ impl<'a, I: Write + WriteRead> BatteryStatusI2C<'a, I> {
         while match self.read_register_u16(REG_MODEL_CFG) {
             Ok(r) => r & 0x8000 != 0,
             Err(e) => {
-                rprintln!("Error {:?}", e);
+                rprintln!("Error writing model config {:?}", e);
                 true
             }
         } {
             self.delay_ms(10);
         }
         // Recover initial Hibernate Config
+        rprintln!("Recover Hibernate Config");
         self.write_register_u16(REG_HIB_CFG, initial_hib_cfg)?;
 
-        self.init_step_3()
+        self.init_step_3(false)
     }
 
-    fn init_step_3(&mut self) -> Result<(), BatteryStatusError> {
-        if !self.is_ready_for_3_2() {
+    fn init_step_3(&mut self, skip_check: bool) -> Result<(), BatteryStatusError> {
+        // Step 3
+        let status = self.read_register_u16(REG_STATUS)?;
+        self.write_register_u16(REG_STATUS, status & 0xFFFD)?;
+        // Step 3.1
+        if !skip_check && !self.is_ready_for_3_2() {
             rprintln!("Battery Status IC not ready, initializing steps 1-3");
             return self.init_step_1();
         }
@@ -208,12 +207,12 @@ impl<'a, I: Write + WriteRead> BatteryStatusI2C<'a, I> {
     }
 
     fn soc_to_perc(soc: u16) -> u8 {
-        return (soc * 256 / 100) as u8;
+        return (soc as u32 * 256 as u32 / 100) as u8;
     }
 
     fn tte_to_mins(tte: u16) -> u16 {
-        const TTE_FACTOR: f32 = 5.625;
-        tte * TTE_FACTOR as u16
+        const TTE_FACTOR: u16 = 5_625;
+        (tte as u32 * TTE_FACTOR as u32 / 1000 as u32) as u16
     }
 
     pub fn delay_ms(&self, ms: u8) {
@@ -245,11 +244,12 @@ impl<'a, I: Write + WriteRead> BatteryStatusI2C<'a, I> {
 
     fn read_register_u16(&mut self, register: u8) -> Result<u16, BatteryStatusError> {
         let mut bytes = [0u8; 2];
-        rprintln!("Write Read 0x{:02x}, 0x{:02x}", self.address, register);
         self.interface
             .write_read(self.address, &[register], &mut bytes)
-            .map_err(|_| BatteryStatusError::I2cWriteRead)?;
-        rprintln!("Write Read Finished");
+            .map_err(|e| {
+                rprintln!("Got an error: {:?}", e);
+                BatteryStatusError::I2cWriteRead
+            })?;
         Ok(u16::from_le_bytes(bytes))
     }
 

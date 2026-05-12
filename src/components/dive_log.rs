@@ -603,7 +603,10 @@ impl LogPointData {
     ) -> Self {
         let basic_data = BasicLogPointData {
             time_delta: (value.time_ms / 1000) as u16,
-            depth_m: U10F6::from_num(value.depth.to_msw().to_f32()),
+            depth_m: match value.depth.to_msw().to_f32() {
+                v if v >= 0.0 => U10F6::from_num(v),
+                _ => U10F6::from_num(0.0),
+            },
             metadata,
             battery,
             temperature,

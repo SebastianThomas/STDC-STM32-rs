@@ -10,7 +10,6 @@ pub mod macros;
 
 #[cfg(target_os = "none")]
 pub mod components;
-
 #[cfg(target_os = "none")]
 pub mod protocols;
 

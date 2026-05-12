@@ -6,7 +6,7 @@ use cortex_m::interrupt::{Mutex, free};
 use rtt_target::rprintln;
 use stm32l4xx_hal::hal::blocking::spi;
 
-use stdc_diving_algorithms::pressure_unit::{Bar, Pa, Pressure, msw};
+use stdc_diving_algorithms::pressure_unit::{Bar, Pa, Pressure, mBar, msw};
 
 use crate::constants::barometric::{
     ALT_PER_FOOT, DepthOrAltitude, FEET_TO_METERS, KG_M2_FRESH_WATER, RLGM, SURFACE_PA,
@@ -96,20 +96,18 @@ fn write_i2c<I: Write>(i2c: &mut I, addr: u8, data: &[u8])
 where
     <I as cortex_m::prelude::_embedded_hal_blocking_i2c_Write>::Error: Debug,
 {
-    rprintln!("Writing to {:#x}: {:02x?}", addr, &data);
     if let Err(e) = i2c.write(addr, data) {
         rprintln!("Write failed: {:?}", e);
         panic!("Write failed");
     }
-    rprintln!("Successfully written to {:#x}: {:?}", addr, data);
 }
 
-fn read_i2c<I: Read, const NR: usize>(i2c: &mut I, addr: u8) -> [u8; NR]
+fn write_read_i2c<I: WriteRead, const NR: usize>(i2c: &mut I, addr: u8, reg: u8) -> [u8; NR]
 where
-    <I as cortex_m::prelude::_embedded_hal_blocking_i2c_Read>::Error: Debug,
+    <I as WriteRead>::Error: Debug,
 {
     let mut result: [u8; NR] = [0; NR];
-    if let Err(e) = i2c.read(addr, &mut result) {
+    if let Err(e) = i2c.write_read(addr, &[reg], &mut result) {
         rprintln!("Reading failed: {:?}", e);
         panic!("Reading failed");
     }
@@ -237,9 +235,7 @@ where
     ) -> MS5849<'a, I, ()> {
         let mut cal: [u16; 10] = [0; 10];
 
-        /* Reset and Calibrate */
         // Reset the MS5849, per datasheet
-        // write_i2c(&mut i2c, MS5849_I2C_ADDR, &[]);
         write_i2c(&mut i2c, MS5849_I2C_ADDR, &[MS5849_RESET]);
 
         rprintln!("Reset MS5849 Pressure Sensor, waiting to get ready");
@@ -247,13 +243,35 @@ where
 
         wait_us(delay, 300_u16);
 
-        // Read calibration values and CRC
-        for i in 0..7 {
-            // TODO: New MS5849 with new addresses from 4-13
-            write_i2c(&mut i2c, MS5849_I2C_ADDR, &[MS5849_PROM_READ + i * 2]);
+        let serial_nr_msbs: [u8; 2] =
+            write_read_i2c(&mut i2c, MS5849_I2C_ADDR, MS5849_PROM_READ + (2 << 1));
+        let serial_nr_lsbs: [u8; 2] =
+            write_read_i2c(&mut i2c, MS5849_I2C_ADDR, MS5849_PROM_READ + (3 << 1));
+        rprintln!(
+            "Serial Number of MS5849 Pressure Sensor: 0x{:02x}{:02x}{:02x}{:02x}",
+            serial_nr_msbs[0],
+            serial_nr_msbs[1],
+            serial_nr_lsbs[0],
+            serial_nr_lsbs[1],
+        );
 
-            let buf: [u8; 2] = read_i2c(&mut i2c, MS5849_I2C_ADDR);
-            cal[i as usize] = (buf[0] as u16) << 8 | buf[1] as u16;
+        // Read calibration values and CRC
+        for i in 4..=13 {
+            let buf: [u8; 2] =
+                write_read_i2c(&mut i2c, MS5849_I2C_ADDR, MS5849_PROM_READ + (i << 1));
+            cal[(i - 4) as usize] = (buf[0] as u16) << 8 | buf[1] as u16;
+        }
+        rprintln!("Got calibration values: {:?}", cal);
+
+        let product_id_and_crc: [u8; 2] =
+            write_read_i2c(&mut i2c, MS5849_I2C_ADDR, MS5849_PROM_READ + (15 << 1));
+
+        if product_id_and_crc[0] != 0x01 {
+            rprintln!(
+                "Product ID of Pressure Sensor should be 0x01, is: {:02x}",
+                product_id_and_crc[0]
+            );
+            panic!("Pressure Sensor broken or not compatible.");
         }
 
         // TODO: Verify that data is correct with CRC
@@ -290,9 +308,7 @@ where
 
         self.wait_ms(20); // Max conversion time per datasheet
 
-        write_i2c(&mut self.interface, MS5849_I2C_ADDR, &[MS5849_ADC_READ_D1]);
-
-        let buf: [u8; 3] = read_i2c(&mut self.interface, MS5849_I2C_ADDR);
+        let buf: [u8; 3] = write_read_i2c(&mut self.interface, MS5849_I2C_ADDR, MS5849_ADC_READ_D1);
         let d1_pres = (buf[0] as u32) << 16 | (buf[0] as u32) << 8 | buf[0] as u32;
         self.D1_pres = Some(d1_pres);
 
@@ -305,9 +321,7 @@ where
 
         self.wait_ms(20); // Max conversion time per datasheet
 
-        write_i2c(&mut self.interface, MS5849_I2C_ADDR, &[MS5849_ADC_READ_D2]);
-
-        let buf: [u8; 3] = read_i2c(&mut self.interface, MS5849_I2C_ADDR);
+        let buf: [u8; 3] = write_read_i2c(&mut self.interface, MS5849_I2C_ADDR, MS5849_ADC_READ_D2);
         let d2_temp = (buf[0] as u32) << 16 | (buf[0] as u32) << 8 | buf[0] as u32;
         self.D2_temp = Some(d2_temp);
 
@@ -329,51 +343,23 @@ impl<'a, I, P> MS5849<'a, I, P> {
     }
     #[allow(non_snake_case)]
     pub fn calculate(&mut self) -> Option<()> {
-        // Given C1-C6 and D1, D2, calculated TEMP and P
-        // Do conversion first and then second order temp compensation
+        // Raw values
+        let d1_pres = self.D1_pres? as f32;
+        let d2_temp = self.D2_temp? as f32;
 
-        let mut SENSi: i64 = 0;
-        let mut OFFi: i64 = 0;
-        let mut Ti: i64 = 0;
-        let OFF2: i64;
-        let SENS2: i64;
+        let temperature = (self.C[0] as f32 * d2_temp) / (1 << 29) as f32
+            - (self.C[2] as f32 * d1_pres) / (1u64 << 35) as f32
+            - self.C[1] as f32 / (1 << 6) as f32;
 
-        let d1_pres = self.D1_pres? as i64;
-        let d2_temp = self.D2_temp? as i64;
+        let OFF = self.C[5] as f32 + self.C[6] as f32 * temperature / (1 << 9) as f32;
+        let SENS = self.C[7] as f32 + self.C[8] as f32 * temperature / (1 << 9) as f32;
+        let pressure = d1_pres * SENS / ((1 << 22) as f32) - OFF;
 
-        // Terms called
-        let dT: i64 = d2_temp as i64 - (self.C[5] as i64) * 256;
-        let SENS: i64 = (self.C[1] as i64) * 32768 + ((self.C[3] as i64) * dT) / 256;
-        let OFF: i64 = (self.C[2] as i64) * 65536 + ((self.C[4] as i64) * dT) / 128;
-        self.P = Some(((d1_pres * SENS / (2097152 as i64) - OFF) / (8192)) as i32);
+        self.P = Some((pressure * 10.0) as i32);
+        self.TEMP = Some((temperature * 100.0) as i32);
 
-        // Temp conversion
-        let temperature = 2000 + (dT) * self.C[6] as i64 / 8388608 as i64;
-
-        //Second order compensation
-        if (temperature / 100) < 20 {
-            //Low temp
-            Ti = (3 * dT * dT) / (8589934592 as i64);
-            OFFi = (3 * (temperature - 2000) * (temperature - 2000)) / 2;
-            SENSi = (5 * (temperature - 2000) * (temperature - 2000)) / 8;
-            if (temperature / 100) < -15 {
-                //Very low temp
-                OFFi = OFFi as i64 + 7 * (temperature + 1500) * (temperature + 1500);
-                SENSi = SENSi as i64 + 4 * (temperature + 1500) * (temperature + 1500);
-            }
-        } else if (temperature / 100) >= 20 {
-            //High temp
-            Ti = 2 * (dT * dT) / (137438953472 as i64);
-            OFFi = (1 * (temperature - 2000) * (temperature - 2000)) / 16;
-            SENSi = 0;
-        }
-
-        OFF2 = OFF - OFFi; //Calculate pressure and temp second order
-        SENS2 = SENS - SENSi;
-
-        self.TEMP = Some((temperature - Ti) as i32);
-
-        self.P = Some((((d1_pres as i64 * SENS2) / (2097152 as i64) - OFF2) / 8192) as i32);
+        // TODO: Second order compensation:
+        // https://download.mikroe.com/documents/datasheets/MS5849-30BA_datasheet.pdf page 11
         Some(())
     }
 
@@ -394,8 +380,10 @@ impl<'a, I, P> MS5849<'a, I, P> {
             None => return Err((None, "No pressure")),
         };
         // TODO: Allow slight difference
-        let is_submerged = (pressure - surf_ref).to_f32() > 0.0;
+        const SUBMERGED_DIFF: Pa = mBar::new(50.0).to_pa(); // half a meter
+        let is_submerged = pressure - surf_ref > SUBMERGED_DIFF;
         if is_submerged {
+            rprintln!("Is submerged");
             let pressure_below = pressure - surf_ref;
             let depth: f32 = (pressure_below / self.config.fluid_density_10m).to_f32();
             return Ok(DepthOrAltitude::Depth {

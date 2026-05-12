@@ -11,6 +11,28 @@ pub const ICHG_TERM: u16 =
 /** [15:7] = Recovery Voltage: 3.88V, [6:0] = Empty: 3.0V */
 pub const VEMPTY: u16 = 0x9659;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Max17262Variant {
+    R,
+    H,
+}
+
+impl Max17262Variant {
+    pub fn capacity_lsb_mah(self) -> f32 {
+        match self {
+            Self::R => 0.5,
+            Self::H => 0.1667,
+        }
+    }
+
+    pub fn current_lsb_ma(self) -> f32 {
+        match self {
+            Self::R => 0.15625,
+            Self::H => 0.052083,
+        }
+    }
+}
+
 #[cfg(all(test, not(target_os = "none")))]
 mod test {
     use super::*;

@@ -7,8 +7,6 @@
 
 use core::cell::RefCell;
 
-use panic_probe as _;
-
 use cortex_m::interrupt::{Mutex as CmMutex, free};
 use modes::{AppMode, SurfaceModeExit};
 use rtic_monotonics::stm32::prelude::*;
@@ -376,16 +374,20 @@ mod app {
             }
         };
 
-        let scl = gpioc.pc0.into_alternate_open_drain(
+        let mut scl = gpioc.pc0.into_alternate_open_drain(
             &mut gpioc.moder,
             &mut gpioc.otyper,
             &mut gpioc.afrl,
         );
-        let sda = gpioc.pc1.into_alternate_open_drain(
+        // TODO: Disable internal Pull-up once Pull-ups are added on PCB
+        scl.internal_pull_up(&mut gpioc.pupdr, true);
+        let mut sda = gpioc.pc1.into_alternate_open_drain(
             &mut gpioc.moder,
             &mut gpioc.otyper,
             &mut gpioc.afrl,
         );
+        // TODO: Disable internal Pull-up once Pull-ups are added on PCB
+        sda.internal_pull_up(&mut gpioc.pupdr, true);
         let battery_status: BatteryGauge<'static> = BatteryStatusI2C::new(
             I2c::i2c3(
                 dp.I2C3,
@@ -428,7 +430,7 @@ mod app {
                 latest_measurements: LatestMeasurements::new(),
             },
             Local {
-                mode: AppMode::Bluetooth,
+                mode: AppMode::Surface,
                 dive_mode_indicator,
                 mode_surface_pressure: start_pressure,
                 surface_mode_state: modes::surface::SurfaceModeState::new(),
@@ -481,19 +483,26 @@ mod app {
     ])]
     async fn task_mode_tick(mut cx: task_mode_tick::Context) {
         sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
-        rprintln!("Task Mode Tick");
+        rprintln!("Task Mode Tick in mode: {:?}", cx.local.mode);
 
         match *cx.local.mode {
             AppMode::Surface => {
+                rprintln!("Locking shared latest measurements");
                 let surface_exit = cx.shared.latest_measurements.lock(|latest_measurements| {
-                    modes::surface::run_surface_mode_tick(
+                    rprintln!("Enter latest measurements");
+                    let mode = modes::surface::run_surface_mode_tick(
                         cx.local.surface_mode_state,
                         cx.local.ms5849_i2c,
                         cx.local.flash,
                         latest_measurements,
                         cx.local.logger,
-                    )
+                    );
+                    rprintln!("Exit latest measurements");
+                    modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
+                    sync_power_cut_indicator();
+                    mode
                 });
+                rprintln!("Finished Surface Tick with exit mode {:?}", surface_exit);
 
                 match surface_exit {
                     Some(SurfaceModeExit::Dive(surface_pressure)) => {
@@ -507,17 +516,19 @@ mod app {
                             &GASES,
                         ));
                     }
-                    Some(SurfaceModeExit::_Bluetooth(surface_pressure)) => {
+                    Some(SurfaceModeExit::Bluetooth(surface_pressure)) => {
                         *cx.local.mode_surface_pressure = surface_pressure;
                         *cx.local.mode = AppMode::Bluetooth;
                         cx.local.bluetooth_mode_state.on_enter();
                     }
                     None => {
+                        rprintln!("Going to sleep");
                         sync_power_cut_indicator();
                         sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
-                        enter_stop2_for_surface(cx.local.rtc);
-                        let _ = wake_reinit::spawn();
-                        return;
+                        // enter_stop2_for_surface(cx.local.rtc);
+                        // let _ = wake_reinit::spawn();
+                        // return; // Return early instead of respawning self
+                        Mono::delay(200u64.millis()).await;
                     }
                 }
             }
@@ -584,12 +595,9 @@ mod app {
     async fn task_battery_update(mut cx: task_battery_update::Context) {
         rprintln!("Task Battery Update Tick");
         cx.shared.latest_measurements.lock(|latest_measurements| {
-            rprintln!("Critical Section Shared Latest Measurements start");
             tasks::battery::calc_battery_status(cx.local.battery_status, latest_measurements);
-            rprintln!("Critical Section Shared Latest Measurements end");
         });
 
-        rprintln!("Await next update");
         tasks::battery::wait_for_next_battery_update().await;
         let _ = task_battery_update::spawn();
     }
@@ -703,4 +711,51 @@ fn sync_dive_mode_indicator(dive_mode_indicator: &mut Pc8Output, mode: &AppMode)
     } else {
         let _ = dive_mode_indicator.set_high();
     }
+}
+
+// Copied from panic_probe
+// Panic handler for `probe-run`.
+//
+// When this panic handler is used, panics will make `probe-run` print a backtrace and exit with a
+// non-zero status code, indicating failure. This building block can be used to run on-device
+// tests.
+//
+
+use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    static PANICKED: AtomicBool = AtomicBool::new(false);
+    rprintln!("PANIC");
+
+    cortex_m::interrupt::disable();
+
+    // Guard against infinite recursion, just in case.
+    if !PANICKED.load(Ordering::Relaxed) {
+        PANICKED.store(true, Ordering::Relaxed);
+
+        rprintln!("{}", info);
+    }
+
+    hard_fault();
+}
+
+/// Trigger a `HardFault` via `udf` instruction.
+#[cfg(target_os = "none")]
+pub fn hard_fault() -> ! {
+    // If `UsageFault` is enabled, we disable that first, since otherwise `udf` will cause that
+    // exception instead of `HardFault`.
+    {
+        const SHCSR: *mut u32 = 0xE000ED24usize as _;
+        const USGFAULTENA: usize = 18;
+
+        unsafe {
+            let mut shcsr = core::ptr::read_volatile(SHCSR);
+            shcsr &= !(1 << USGFAULTENA);
+            core::ptr::write_volatile(SHCSR, shcsr);
+        }
+    }
+
+    cortex_m::asm::udf();
 }

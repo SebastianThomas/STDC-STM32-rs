@@ -66,6 +66,7 @@ where
     <I as Write>::Error: Debug,
     <I as WriteRead>::Error: Debug,
 {
+    rprintln!("Getting current time");
     if millis_tim2_since(state.last_polled_millis) < SURFACE_POLL_INTERVAL_MILLIS {
         return None;
     }

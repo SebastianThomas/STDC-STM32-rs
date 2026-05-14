@@ -14,6 +14,8 @@ pub mod macros;
 pub mod components;
 #[cfg(target_os = "none")]
 pub mod protocols;
+#[cfg(target_os = "none")]
+pub mod stm32;
 
 #[cfg(all(test, not(target_os = "none")))]
 #[path = "components/battery_status/battery_status_values.rs"]

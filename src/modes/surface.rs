@@ -1,6 +1,5 @@
-use core::{cell::RefCell, fmt::Debug};
+use core::fmt::Debug;
 
-use cortex_m::interrupt::{Mutex, free};
 use rtt_target::rprintln;
 use stdc_diving_algorithms::{dive::DiveMeasurement, pressure_unit::Pa};
 use stm32l4xx_hal::hal::blocking::i2c::{Read, Write, WriteRead};
@@ -11,10 +10,11 @@ use stdc_stm32_rs::{
         MS5849,
         dive_log::{LevelState, LogPointData, LogPointMetadata},
         flash::Flash,
-        uart_log::ExternalLogger,
     },
-    constants::barometric::{DepthOrAltitude, SURFACE_PA},
+    constants::barometric::DepthOrAltitude,
 };
+
+use crate::DEFAULT_SURFACE_PRESSURE;
 
 use super::{
     POWER_CUT_UNSAFE_FLASH_WRITE, SurfaceModeExit, millis_tim2, millis_tim2_since,
@@ -54,12 +54,11 @@ impl SurfaceModeState {
     }
 }
 
-pub fn run_surface_mode_tick<I: Write + Read + WriteRead, F: Flash, L: ExternalLogger>(
+pub async fn run_surface_mode_tick<I: Write + Read + WriteRead, F: Flash>(
     state: &mut SurfaceModeState,
-    ms5849_i2c: &mut MS5849<'_, I, ()>,
+    ms5849_i2c: &mut MS5849<I, ()>,
     flash: &mut F,
     latest_measurements: &mut crate::LatestMeasurements,
-    logger: &Mutex<RefCell<L>>,
 ) -> Option<SurfaceModeExit>
 where
     <I as Read>::Error: Debug,
@@ -67,11 +66,17 @@ where
     <I as WriteRead>::Error: Debug,
 {
     rprintln!("Getting current time");
-    if millis_tim2_since(state.last_polled_millis) < SURFACE_POLL_INTERVAL_MILLIS {
+    let millis_since = millis_tim2_since(state.last_polled_millis);
+    if millis_since < SURFACE_POLL_INTERVAL_MILLIS {
+        rprintln!("Current measurements are up to date: {} ms", millis_since);
         return None;
     }
-    state.last_polled_millis = millis_tim2();
-    ms5849_i2c.read_i2c();
+    rprintln!(
+        "Updating measurements (not up to date: {} ms)",
+        millis_since
+    );
+    let current_measurement_millis = millis_tim2();
+    ms5849_i2c.read_i2c().await;
     let pressure = match ms5849_i2c.current_pressure_pa() {
         Some(p) => p,
         None => {
@@ -79,7 +84,6 @@ where
             return None;
         }
     };
-    let current_measurement_millis = millis_tim2();
     let temperature_c = ms5849_i2c.temperature();
     latest_measurements.record_environment(
         pressure,
@@ -87,6 +91,8 @@ where
         temperature_c,
         current_measurement_millis,
     );
+
+    rprintln!("Somethin");
 
     let next_flash_iter = state
         .flash_log_algorithm
@@ -103,22 +109,25 @@ where
             state,
         )
     }
+    state.last_polled_millis = current_measurement_millis;
 
-    handle_surface_mode_tick_end(ms5849_i2c, state, pressure, logger)
+    handle_surface_mode_tick_end(ms5849_i2c, state)
 }
 
-fn handle_surface_mode_tick_end<I: Write + Read + WriteRead, L: ExternalLogger>(
-    ms5849_i2c: &mut MS5849<'_, I, ()>,
+fn handle_surface_mode_tick_end<I: Write + Read + WriteRead>(
+    ms5849_i2c: &mut MS5849<I, ()>,
     state: &mut SurfaceModeState,
-    pressure: Pa,
-    logger: &Mutex<RefCell<L>>,
 ) -> Option<SurfaceModeExit>
 where
     <I as Read>::Error: Debug,
     <I as Write>::Error: Debug,
     <I as WriteRead>::Error: Debug,
 {
-    match ms5849_i2c.depth_relative_or_altitude(SURFACE_PA) {
+    match ms5849_i2c.depth_relative_or_altitude(
+        state
+            .prev_surface_altitude
+            .unwrap_or(DEFAULT_SURFACE_PRESSURE),
+    ) {
         Ok(DepthOrAltitude::Depth { pressure, depth }) => {
             rprintln!(
                 "Starting Dive: Pressure: {:?}, depth: {:?}",
@@ -136,15 +145,10 @@ where
                 pressure,
                 altitude
             );
-            log_bytes(logger, b"Surface mode tick complete");
             None
         }
         Err(err) => {
-            rprintln!(
-                "Got error while reading depth for pressure {:?}: {:?}.",
-                pressure,
-                err,
-            );
+            rprintln!("Got error while reading depth: {:?}.", err,);
             None
         }
     }
@@ -181,12 +185,4 @@ fn log_data_flash<F: Flash>(
             rprintln!("Got error writing new measurement to flash {:?}", e);
         }
     }
-}
-
-fn log_bytes<L: ExternalLogger>(logger: &Mutex<RefCell<L>>, bytes: &[u8]) {
-    free(|cs| {
-        if let Err(_) = logger.borrow(cs).borrow_mut().log_bytes(bytes) {
-            rprintln!("Failed logging bytes to UART");
-        }
-    });
 }

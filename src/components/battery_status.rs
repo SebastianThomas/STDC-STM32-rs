@@ -1,16 +1,16 @@
 mod battery_status_values;
 pub use battery_status_values::Max17262Variant;
 use battery_status_values::*;
+use rtic_monotonics::{Monotonic, fugit::ExtU64};
 
-use core::{cell::RefCell, fmt::Debug};
+use core::fmt::Debug;
 
-use cortex_m::interrupt::{Mutex, free};
 use rtt_target::rprintln;
 use stm32l4xx_hal::{
-    delay::Delay,
     hal::blocking::i2c::{Write, WriteRead},
-    prelude::*,
 };
+
+use crate::stm32::Mono;
 
 pub const MAX17262_I2C_ADDRESS: u8 = 0x36;
 
@@ -65,14 +65,13 @@ pub enum BatteryStatusError {
 /**
 * Given Layout: MAX17262_REWL+T
 */
-pub struct BatteryStatusI2C<'a, I> {
+pub struct BatteryStatusI2C<I> {
     interface: I,
-    delay: &'a Mutex<RefCell<Delay>>,
     address: u8,
     variant: Max17262Variant,
 }
 
-impl<I: Write + WriteRead> BatteryStatus for BatteryStatusI2C<'_, I>
+impl<I: Write + WriteRead> BatteryStatus for BatteryStatusI2C<I>
 where
     <I as WriteRead>::Error: Debug,
 {
@@ -81,27 +80,21 @@ where
     }
 }
 
-impl<'a, I: Write + WriteRead> BatteryStatusI2C<'a, I>
+impl<I: Write + WriteRead> BatteryStatusI2C<I>
 where
     <I as WriteRead>::Error: Debug,
 {
-    pub fn new(i2c: I, delay: &'a Mutex<RefCell<Delay>>, variant: Max17262Variant) -> Self {
-        Self::with_address(i2c, delay, MAX17262_I2C_ADDRESS, variant)
+    pub async fn new(i2c: I, variant: Max17262Variant) -> Self {
+        Self::with_address(i2c, MAX17262_I2C_ADDRESS, variant).await
     }
 
-    fn with_address(
-        i2c: I,
-        delay: &'a Mutex<RefCell<Delay>>,
-        address: u8,
-        variant: Max17262Variant,
-    ) -> Self {
+    async fn with_address(i2c: I, address: u8, variant: Max17262Variant) -> Self {
         let mut s = Self {
             interface: i2c,
-            delay,
             address,
             variant,
         };
-        if let Err(e) = s.create_init() {
+        if let Err(e) = s.create_init().await {
             rprintln!("Failed initializing battery status IC: {:?}", e);
             panic!("Failed initializing battery status IC: {:?}", e);
         }
@@ -109,12 +102,7 @@ where
     }
 
     fn is_ready_for_3_2(&mut self) -> bool {
-        rprintln!("Read Status Register");
         let status_reg = self.read_register_u16(REG_STATUS);
-        rprintln!(
-            "Finished Reading Status Register: {:08b}",
-            status_reg.unwrap_or(0xFFFF)
-        );
         let status_por = status_reg.map(|s| s & 0x0002);
         if let Ok(0) = status_por {
             return true;
@@ -126,15 +114,16 @@ where
     }
 
     // Initialization according to https://www.analog.com/media/en/technical-documentation/user-guides/modelgauge-m5-host-side-software-implementation-guide.pdf
-    fn create_init(&mut self) -> Result<(), BatteryStatusError> {
+    async fn create_init(&mut self) -> Result<(), BatteryStatusError> {
         rprintln!("Initialize Battery Status IC");
         if self.is_ready_for_3_2() {
-            return self.init_step_3(true);
+            return self.init_step_3(true).await;
         }
-        self.init_step_1()
+        self.init_step_1().await
     }
 
-    fn init_step_1(&mut self) -> Result<(), BatteryStatusError> {
+    async fn init_step_1(&mut self) -> Result<(), BatteryStatusError> {
+        rprintln!("Initialize Battery Status IC: Full, Step 1");
         while match self.read_register_u16(REG_FSTAT) {
             Ok(s) => s & 1 == 1,
             Err(e) => {
@@ -142,25 +131,23 @@ where
                 true
             }
         } {
-            self.delay_ms(10);
+            self.delay_ms(10).await;
         }
-        self.init_step_2()
+        self.init_step_2().await
     }
 
-    fn init_step_2(&mut self) -> Result<(), BatteryStatusError> {
+    async fn init_step_2(&mut self) -> Result<(), BatteryStatusError> {
+        rprintln!("Initialize Battery Status IC: Full, Step 1");
         // Exit Hibernate Mode
-        rprintln!("Exit Hibernate Mode");
         let initial_hib_cfg = self.read_register_u16(REG_HIB_CFG)?;
         self.write_register_u16(REG_COMMAND, 0x0090)?;
         self.write_register_u16(REG_HIB_CFG, 0x0000)?;
         self.write_register_u16(REG_COMMAND, 0x0000)?;
         // EZ Config
-        rprintln!("EZ Config");
         self.write_register_u16(REG_DESIGN_CAP, DESIGN_CAP)?;
         self.write_register_u16(REG_ICHG_TERM, ICHG_TERM)?;
         self.write_register_u16(REG_VEMPTY, VEMPTY)?;
         // Model Config
-        rprintln!("Model Config");
         let modelcfg = if CHARGE_VOLTAGE > 4.275 {
             0x8400
         } else {
@@ -174,24 +161,31 @@ where
                 true
             }
         } {
-            self.delay_ms(10);
+            self.delay_ms(10).await;
         }
         // Recover initial Hibernate Config
-        rprintln!("Recover Hibernate Config");
         self.write_register_u16(REG_HIB_CFG, initial_hib_cfg)?;
 
-        self.init_step_3(false)
+        self.init_step_3_1(false)
     }
 
-    fn init_step_3(&mut self, skip_check: bool) -> Result<(), BatteryStatusError> {
+    async fn init_step_3(&mut self, skip_check: bool) -> Result<(), BatteryStatusError> {
         // Step 3
         let status = self.read_register_u16(REG_STATUS)?;
         self.write_register_u16(REG_STATUS, status & 0xFFFD)?;
         // Step 3.1
         if !skip_check && !self.is_ready_for_3_2() {
             rprintln!("Battery Status IC not ready, initializing steps 1-3");
-            return self.init_step_1();
+            return self.init_step_1().await;
         }
+        self.init_step_3_1(true)
+    }
+
+    fn init_step_3_1(&mut self, skip_status_write: bool) -> Result<() ,BatteryStatusError> {
+        if !skip_status_write {
+        // Step 3
+        let status = self.read_register_u16(REG_STATUS)?;
+        self.write_register_u16(REG_STATUS, status & 0xFFFD)?;}
         rprintln!("Battery Status IC ready, initializing step 3");
         let cap = self.read_register_u16(REG_REP_CAP)?;
         let soc = self.read_register_u16(REG_REP_SOC)?;
@@ -215,8 +209,8 @@ where
         (tte as u32 * TTE_FACTOR as u32 / 1000 as u32) as u16
     }
 
-    pub fn delay_ms(&self, ms: u8) {
-        free(|cs| self.delay.borrow(cs).borrow_mut().delay_ms(ms));
+    pub async fn delay_ms(&self, ms: u64) {
+        Mono::delay(ms.millis()).await;
     }
 
     pub fn free(self) -> I {
@@ -230,7 +224,6 @@ where
         let temperature = self.read_register_i16(REG_TEMP)?;
         let rep_cap = self.read_register_u16(REG_REP_CAP)?;
         let full_cap_rep = self.read_register_u16(REG_REP_FULL_CAP)?;
-        rprintln!("Finished Reading Battery I2C Registers");
 
         Ok(BatterySnapshot {
             state_of_charge_percent: Self::decode_soc_percent(rep_soc),

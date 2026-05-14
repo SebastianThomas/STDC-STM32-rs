@@ -1,6 +1,10 @@
+use rtic_monotonics::Monotonic;
+use rtic_monotonics::fugit::ExtU64;
 use rtt_target::rprintln;
 use stm32l4xx_hal::hal::blocking::spi::{Transfer, Write};
 use stm32l4xx_hal::hal::digital::v2::OutputPin;
+
+use crate::stm32::Mono;
 
 /**
  * Write `cmd` to the `spi`, then read into `buf`. Sets `cs` to low before transmit and high after
@@ -28,15 +32,14 @@ where
     }
 }
 
-pub fn spi_write_delay<SPI, CS, F>(spi: &mut SPI, cs: &mut CS, cmd: u8, delay_us: F)
+pub async fn spi_write_delay<SPI, CS>(spi: &mut SPI, cs: &mut CS, cmd: u8, delay_us: u64)
 where
     SPI: Transfer<u8> + Write<u8>,
     CS: OutputPin,
-    F: Fn(),
 {
     cs.set_low().ok();
     spi.write(&[cmd]).ok();
-    delay_us();
+    Mono::delay(delay_us.micros()).await;
     cs.set_high().ok();
 }
 

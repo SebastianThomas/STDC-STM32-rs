@@ -4,7 +4,7 @@ use core::future::Future;
 use core::cell::RefCell;
 
 #[cfg(all(target_os = "none", feature = "online_benchmarking"))]
-use cortex_m::interrupt::{free, Mutex};
+use cortex_m::interrupt::{Mutex, free};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BenchmarkSample {
@@ -152,9 +152,7 @@ pub fn log_sample(_sample: &BenchmarkSample) {}
 pub fn log_sample(sample: &BenchmarkSample) {
     println!(
         "bench {} cycles={} nanos={}",
-        sample.label,
-        sample.cycles,
-        sample.nanos
+        sample.label, sample.cycles, sample.nanos
     );
 }
 
@@ -206,3 +204,4 @@ pub fn log_samples(samples: &[BenchmarkSample]) {
 pub fn nanos_per_cycle(cycles: u64, clock_hz: u64) -> u64 {
     cycles.saturating_mul(1_000_000_000) / clock_hz
 }
+

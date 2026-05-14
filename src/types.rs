@@ -41,7 +41,7 @@ pub type Pb7I2c1Sda = stm32l4xx_hal::gpio::Pin<
     7,
 >;
 pub type SensorI2c = I2c<pac::I2C1, (Pb6I2c1Scl, Pb7I2c1Sda)>;
-pub type SensorMs5849<'a> = MS5849<'a, SensorI2c, ()>;
+pub type SensorMs5849 = MS5849<SensorI2c, ()>;
 
 pub type Pc0I2c3Scl = stm32l4xx_hal::gpio::Pin<
     stm32l4xx_hal::gpio::Alternate<stm32l4xx_hal::gpio::OpenDrain, 4>,
@@ -56,7 +56,7 @@ pub type Pc1I2c3Sda = stm32l4xx_hal::gpio::Pin<
     1,
 >;
 pub type BatteryI2c = I2c<pac::I2C3, (Pc0I2c3Scl, Pc1I2c3Sda)>;
-pub type BatteryGauge<'a> = BatteryStatusI2C<'a, BatteryI2c>;
+pub type BatteryGauge = BatteryStatusI2C<BatteryI2c>;
 
 pub type Pc5Output = stm32l4xx_hal::gpio::Pin<
     stm32l4xx_hal::gpio::Output<stm32l4xx_hal::gpio::PushPull>,

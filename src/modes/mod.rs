@@ -14,8 +14,9 @@ pub mod bluetooth;
 pub mod dive;
 pub mod surface;
 
-pub const POWER_CUT_UNSAFE_FLASH_WRITE: u8 = 1 << 0;
+pub const POWER_CUT_UNSAFE_TASK_RUNNING: u8 = 1 << 0;
 pub const POWER_CUT_UNSAFE_FW_TRANSFER: u8 = 1 << 1;
+pub const POWER_CUT_UNSAFE_FLASH_WRITE: u8 = 1 << 2;
 
 static POWER_CUT_UNSAFE_MASK: AtomicU8 = AtomicU8::new(0);
 

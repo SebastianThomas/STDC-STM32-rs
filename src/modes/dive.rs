@@ -17,11 +17,11 @@ use stm32l4xx_hal::{
 };
 
 use stdc_stm32_rs::{
-    benchmarking,
     algorithms::{
         helpers::datetime_to_epoch_seconds,
         rate_algorithm::{DynamicDiffAimdRateAlgorithm, RateAlgorithm},
     },
+    benchmarking,
     components::{
         MS5849,
         dive_log::{
@@ -155,7 +155,7 @@ where
     }
 }
 
-pub fn run_dive_mode_tick<
+pub async fn run_dive_mode_tick<
     D: stdc_stm32_rs::components::display::LedDisplay,
     I: Write + Read + WriteRead,
     F: Flash,
@@ -164,7 +164,7 @@ pub fn run_dive_mode_tick<
 >(
     runtime: &mut DiveRuntime<NUM_GASES>,
     display: &mut D,
-    ms5849_i2c: &mut MS5849<'_, I, ()>,
+    ms5849_i2c: &mut MS5849<I, ()>,
     flash: &mut F,
     latest_measurements: &mut LatestMeasurements,
     latest_calculations_state: &mut LatestCalculationsState<{ NUM_TISSUES }, Pa>,
@@ -185,7 +185,7 @@ where
     let _ = update_dive_time_if_due(&mut runtime.task_state, runtime.dive_start_millis, logger);
 
     let measurement_millis = millis_tim2();
-    ms5849_i2c.read_i2c();
+    ms5849_i2c.read_i2c().await;
     let temperature_c = ms5849_i2c.temperature();
 
     match ms5849_i2c.depth_relative_or_altitude(runtime.surface_pressure) {

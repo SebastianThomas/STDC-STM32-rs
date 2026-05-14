@@ -1,24 +1,24 @@
 use core::fmt::Debug;
 use core::option::Option::{self, None, Some};
 
-use core::cell::RefCell;
-use cortex_m::interrupt::{Mutex, free};
+use rtic_monotonics::Monotonic;
+use rtic_monotonics::fugit::ExtU64;
 use rtt_target::rprintln;
 use stm32l4xx_hal::hal::blocking::spi;
 
 use stdc_diving_algorithms::pressure_unit::{Bar, Pa, Pressure, mBar, msw};
 
 use crate::constants::barometric::{
-    ALT_PER_FOOT, DepthOrAltitude, FEET_TO_METERS, KG_M2_FRESH_WATER, RLGM, SURFACE_PA,
+    ALT_PER_FOOT, DepthOrAltitude, FEET_TO_METERS, KG_M2_FRESH_WATER, RLGM,
 };
 use crate::protocols::spi::{spi_read_register, spi_write_delay};
+use crate::stm32::Mono;
 
 use libm::powf;
 
 // use byteorder::{BigEndian, ByteOrder};
 // use i2cdev::core::I2CDevice;
 use stm32l4xx_hal::{
-    delay::Delay,
     hal::blocking::i2c::{Read, Write, WriteRead},
     prelude::*,
 };
@@ -58,23 +58,23 @@ impl SensorConfiguration {
 #[allow(non_camel_case_types)]
 #[allow(non_snake_case)]
 /// MS5849 Pressure Sensor Driver
-/// 
+///
 /// The MS5849 has an interrupt pin (INT/PB5) that signals when conversion is complete.
 /// When a conversion is started with CONVERT_D1_8192 or CONVERT_D2_8192, the sensor
 /// performs the ADC conversion and pulls the interrupt pin low when ready (~20ms max).
-/// 
+///
 /// **Current Implementation**: Polling-based with fixed delays (20ms per conversion).
-/// **Interrupt-Based Alternative**: 
+/// **Interrupt-Based Alternative**:
 /// - Monitor PB5 EXTI for falling edge (conversion complete)
 /// - Eliminates fixed sleep delays (~40ms total, currently)
 /// - Enables more responsive dive computer, especially during rapid depth changes
 /// - Requires: EXTI interrupt handler + async state machine
-/// 
+///
 /// The interrupt signal allows you to:
 /// 1. Start both D1 and D2 conversions without waiting
 /// 2. Use an EXTI interrupt to receive notification when data is ready
 /// 3. Reduce CPU utilization and sleep time
-pub struct MS5849<'a, INTERFACE, P> {
+pub struct MS5849<INTERFACE, P> {
     interface: INTERFACE,
     config: SensorConfiguration,
     cs: Option<P>,
@@ -83,7 +83,6 @@ pub struct MS5849<'a, INTERFACE, P> {
     D1_pres: Option<u32>,
     D2_temp: Option<u32>,
     C: [u16; 10],
-    delay: &'a Mutex<RefCell<Delay>>,
 }
 
 #[allow(unused)]
@@ -131,26 +130,17 @@ where
     result
 }
 
-fn wait_us(delay: &Mutex<RefCell<Delay>>, us: u16) {
-    free(|cs| delay.borrow(cs).borrow_mut().delay_ms(us));
-}
-
-fn wait_ms(delay: &Mutex<RefCell<Delay>>, ms: u8) {
-    free(|cs| delay.borrow(cs).borrow_mut().delay_ms(ms));
-}
-
-impl<'a, SPI, P> MS5849<'a, SPI, P>
+impl<SPI, P> MS5849<SPI, P>
 where
     SPI: spi::Transfer<u8> + spi::Write<u8>,
     P: OutputPin,
 {
-    pub fn new_spi<L: Fn(&[u8]) -> ()>(
+    pub async fn new_spi<L: Fn(&[u8]) -> ()>(
         mut spi: SPI,
         mut cs: P,
-        delay: &'a Mutex<RefCell<Delay>>,
         log_bytes: L,
-    ) -> MS5849<'a, SPI, P> {
-        let mut cal: [u16; 10] = [0; 10];
+    ) -> MS5849<SPI, P> {
+        let mut prom: [u16; 16] = [0; 16];
 
         rprintln!("Created SPI Interface");
         log_bytes(b"Created SPI Interface");
@@ -160,62 +150,30 @@ where
 
         /* Reset and Calibrate */
         // Reset the MS5837, per datasheet
-        spi_write_delay(&mut spi, &mut cs, MS5849_RESET, || wait_us(delay, 300_u16));
+        spi_write_delay(&mut spi, &mut cs, MS5849_RESET, 300).await;
         rprintln!("Reset SPI");
 
-        let mut serial_number: [u16; 2] = [0; 2];
-        for i in 2..=3 {
+        // Read full PROM map (words 0..15).
+        for i in 0..=15 {
             let mut buf: [u8; 3] = [MS5849_PROM_READ + i * 2, 0, 0];
             spi_read_register(&mut spi, &mut cs, &mut buf);
-            serial_number[(i - 2) as usize] = (buf[1] as u16) << 8 | (buf[2] as u16);
-            rprintln!("Serial number {:?} result: {:?}", i, buf);
-        }
-        rprintln!("Got serial number: {:?}", serial_number);
-
-        // Read calibration values and CRC
-        for i in 4..=13 {
-            let cmd = MS5849_PROM_READ + i * 2;
-            rprintln!("Reading from 0x{:02X}", cmd);
-            let mut buf: [u8; 3] = [cmd, 0, 0];
-            spi_read_register(&mut spi, &mut cs, &mut buf);
-            rprintln!("Got result: {:?}", buf);
-            cal[(i - 4) as usize] = (buf[1] as u16) << 8 | buf[2] as u16;
+            prom[i as usize] = (buf[1] as u16) << 8 | (buf[2] as u16);
         }
 
-        rprintln!("Calibration data: {:?}", cal);
-
-        // Verify calibration data with CRC4
-        let crc_read: u8 = (cal[0] >> 12) as u8;
-        let crc_calculated: u8 = Self::crc4(&cal);
-
-        if crc_calculated != crc_read {
-            rprintln!("CRC4 failed: read=0x{:X}, calculated=0x{:X}", crc_read, crc_calculated);
-            panic!("Calibration CRC4 verification failed");
-        }
-        rprintln!("CRC4 validation passed (0x{:X})", crc_read);
-
-        let config = SensorConfiguration::new(KG_M2_FRESH_WATER);
-        MS5849 {
-            interface: spi,
-            config,
-            cs: Some(cs),
-            P: None,
-            TEMP: None,
-            D1_pres: None,
-            D2_temp: None,
-            C: cal,
-            delay,
-        }
+        let mut instance = Self::build_from_prom(spi, Some(cs), prom);
+        instance.read_spi().await;
+        instance
     }
 
-    pub fn read_spi(&mut self) {
+    pub async fn read_spi(&mut self) {
         // Request D1 conversion
         spi_write_delay(
             &mut self.interface,
             self.cs.as_mut().expect("SPI requires CS"),
             MS5849_CONVERT_D1_8192,
-            || wait_ms(&self.delay, 20_u8),
-        ); // Max conversion time per datasheet
+            20,
+        )
+        .await;
 
         let mut buf: [u8; 4] = [MS5849_ADC_READ_D1, 0, 0, 0];
         spi_read_register(&mut self.interface, self.cs.as_mut().unwrap(), &mut buf);
@@ -227,30 +185,25 @@ where
             &mut self.interface,
             self.cs.as_mut().unwrap(),
             MS5849_CONVERT_D2_8192,
-            || wait_ms(&self.delay, 20_u8),
-        ); // Max conversion time per datasheet
+            20,
+        )
+        .await;
 
         let mut buf: [u8; 4] = [MS5849_ADC_READ_D2, 0, 0, 0];
         spi_read_register(&mut self.interface, self.cs.as_mut().unwrap(), &mut buf);
         let d2_temp = (buf[1] as u32) << 16 | (buf[2] as u32) << 8 | buf[3] as u32;
-        self.D2_temp = Some(d2_temp);
-
-        self.calculate();
+        self.update_raw_measurements(d1_pres, d2_temp);
     }
 }
 
-impl<'a, I: Write + Read + WriteRead> MS5849<'a, I, ()>
+impl<I: Write + Read + WriteRead> MS5849<I, ()>
 where
     <I as Read>::Error: Debug,
     <I as Write>::Error: Debug,
     <I as WriteRead>::Error: Debug,
 {
-    pub fn new_i2c<L: Fn(&[u8]) -> ()>(
-        mut i2c: I,
-        delay: &'a Mutex<RefCell<Delay>>,
-        log_bytes: L,
-    ) -> MS5849<'a, I, ()> {
-        let mut cal: [u16; 10] = [0; 10];
+    pub async fn new_i2c<L: Fn(&[u8]) -> ()>(mut i2c: I, log_bytes: L) -> MS5849<I, ()> {
+        let mut prom: [u16; 16] = [0; 16];
 
         // Reset the MS5849, per datasheet
         write_i2c(&mut i2c, MS5849_I2C_ADDR, &[MS5849_RESET]);
@@ -258,95 +211,118 @@ where
         rprintln!("Reset MS5849 Pressure Sensor, waiting to get ready");
         log_bytes(b"Reset MS5849 Pressure Sensor, waiting to get ready");
 
-        wait_us(delay, 300_u16);
+        Mono::delay(300u64.micros()).await;
 
-        let serial_nr_msbs: [u8; 2] =
-            write_read_i2c(&mut i2c, MS5849_I2C_ADDR, MS5849_PROM_READ + (2 << 1));
-        let serial_nr_lsbs: [u8; 2] =
-            write_read_i2c(&mut i2c, MS5849_I2C_ADDR, MS5849_PROM_READ + (3 << 1));
-        rprintln!(
-            "Serial Number of MS5849 Pressure Sensor: 0x{:02x}{:02x}{:02x}{:02x}",
-            serial_nr_msbs[0],
-            serial_nr_msbs[1],
-            serial_nr_lsbs[0],
-            serial_nr_lsbs[1],
-        );
-
-        // Read calibration values and CRC
-        for i in 4..=13 {
+        // Read full PROM map (words 0..15).
+        for i in 0..=15 {
             let buf: [u8; 2] =
                 write_read_i2c(&mut i2c, MS5849_I2C_ADDR, MS5849_PROM_READ + (i << 1));
-            cal[(i - 4) as usize] = (buf[0] as u16) << 8 | buf[1] as u16;
-        }
-        rprintln!("Got calibration values: {:?}", cal);
-
-        let product_id_and_crc: [u8; 2] =
-            write_read_i2c(&mut i2c, MS5849_I2C_ADDR, MS5849_PROM_READ + (15 << 1));
-
-        if product_id_and_crc[0] != 0x01 {
-            rprintln!(
-                "Product ID of Pressure Sensor should be 0x01, is: {:02x}",
-                product_id_and_crc[0]
-            );
-            panic!("Pressure Sensor broken or not compatible.");
+            prom[i as usize] = (buf[0] as u16) << 8 | buf[1] as u16;
         }
 
-        // Verify calibration data with CRC4
-        let crc_read: u8 = (cal[0] >> 12) as u8;
-        let crc_calculated: u8 = Self::crc4(&cal);
-
-        if crc_calculated != crc_read {
-            rprintln!("CRC4 failed: read=0x{:X}, calculated=0x{:X}", crc_read, crc_calculated);
-            panic!("Calibration CRC4 verification failed");
-        }
-        rprintln!("CRC4 validation passed (0x{:X})", crc_read);
-
-        let config = SensorConfiguration::new(KG_M2_FRESH_WATER);
-        MS5849 {
-            interface: i2c,
-            config,
-            cs: None,
-            P: None,
-            TEMP: None,
-            D1_pres: None,
-            D2_temp: None,
-            C: cal,
-            delay,
-        }
+        let mut instance = Self::build_from_prom(i2c, None, prom);
+        instance.read_i2c().await;
+        instance
     }
 
-    pub fn read_i2c(&mut self) {
+    pub async fn read_i2c(&mut self) {
         // Request D1 conversion
+        rprintln!("MS5849 read_i2c: request D1 conversion");
         write_i2c(
             &mut self.interface,
             MS5849_I2C_ADDR,
             &[MS5849_CONVERT_D1_8192],
         );
 
-        self.wait_ms(20); // Max conversion time per datasheet
-
-        let buf: [u8; 3] = write_read_i2c(&mut self.interface, MS5849_I2C_ADDR, MS5849_ADC_READ_D1);
-        let d1_pres = (buf[0] as u32) << 16 | (buf[1] as u32) << 8 | buf[2] as u32;
-        self.D1_pres = Some(d1_pres);
-
         // Request D2 conversion
+        rprintln!("MS5849 read_i2c: request D2 conversion");
         write_i2c(
             &mut self.interface,
             MS5849_I2C_ADDR,
             &[MS5849_CONVERT_D2_8192],
         );
 
-        self.wait_ms(20); // Max conversion time per datasheet
+        rprintln!("MS5849 read_i2c: waiting on Mono for 20ms");
+
+        Mono::delay(20u64.millis()).await; // Max conversion time per datasheet
+
+        rprintln!("MS5849 read_i2c: Mono delay completed");
+
+        let buf: [u8; 3] = write_read_i2c(&mut self.interface, MS5849_I2C_ADDR, MS5849_ADC_READ_D1);
+        let d1_pres = (buf[0] as u32) << 16 | (buf[1] as u32) << 8 | buf[2] as u32;
+        self.D1_pres = Some(d1_pres);
 
         let buf: [u8; 3] = write_read_i2c(&mut self.interface, MS5849_I2C_ADDR, MS5849_ADC_READ_D2);
         let d2_temp = (buf[0] as u32) << 16 | (buf[1] as u32) << 8 | buf[2] as u32;
-        self.D2_temp = Some(d2_temp);
-
-        self.calculate();
+        self.update_raw_measurements(d1_pres, d2_temp);
     }
 }
 
-impl<'a, I, P> MS5849<'a, I, P> {
+impl<I, P> MS5849<I, P> {
+    fn build_from_prom(interface: I, cs: Option<P>, prom: [u16; 16]) -> MS5849<I, P> {
+        let serial_number: [u16; 2] = [prom[2], prom[3]];
+        let cal = Self::calibration_from_prom(&prom);
+
+        rprintln!(
+            "Serial Number of MS5849 Pressure Sensor: 0x{:04x}{:04x}",
+            serial_number[0],
+            serial_number[1]
+        );
+        rprintln!("Got calibration values: {:?}", cal);
+
+        Self::validate_prom_or_panic(&prom);
+
+        let config = SensorConfiguration::new(KG_M2_FRESH_WATER);
+        MS5849 {
+            interface,
+            config,
+            cs,
+            P: None,
+            TEMP: None,
+            D1_pres: None,
+            D2_temp: None,
+            C: cal,
+        }
+    }
+
+    fn calibration_from_prom(prom: &[u16; 16]) -> [u16; 10] {
+        let mut cal: [u16; 10] = [0; 10];
+        for (idx, coeff) in cal.iter_mut().enumerate() {
+            *coeff = prom[idx + 4];
+        }
+        cal
+    }
+
+    fn validate_prom_or_panic(prom: &[u16; 16]) {
+        let product_id = (prom[15] >> 8) as u8;
+        let crc_read = prom[15] as u8;
+
+        if product_id != 0x01 {
+            rprintln!(
+                "Product ID of Pressure Sensor should be 0x01, is: {:02x}",
+                product_id
+            );
+            panic!("Pressure Sensor broken or not compatible.");
+        }
+
+        let crc_calculated = Self::prom_crc8(prom);
+        if crc_calculated != crc_read {
+            rprintln!(
+                "CRC8 failed: read=0x{:02X}, calculated=0x{:02X}",
+                crc_read,
+                crc_calculated
+            );
+            panic!("Calibration CRC8 verification failed");
+        }
+        rprintln!("CRC8 validation passed (0x{:02X})", crc_read);
+    }
+
+    fn update_raw_measurements(&mut self, d1_pres: u32, d2_temp: u32) {
+        self.D1_pres = Some(d1_pres);
+        self.D2_temp = Some(d2_temp);
+        self.calculate();
+    }
+
     pub fn current_pressure_bar(&self) -> Option<Bar> {
         self.pressure().map(|pa: Pa| pa.to_bar())
     }
@@ -355,9 +331,6 @@ impl<'a, I, P> MS5849<'a, I, P> {
         self.pressure()
     }
 
-    fn wait_ms(&self, ms: u8) {
-        wait_ms(&self.delay, ms);
-    }
     #[allow(non_snake_case)]
     pub fn calculate(&mut self) -> Option<()> {
         // Raw values
@@ -408,7 +381,7 @@ impl<'a, I, P> MS5849<'a, I, P> {
                 depth: msw(depth),
             });
         } else {
-            let p = pressure / SURFACE_PA;
+            let p = pressure / surf_ref;
             let ratio = 1.0 - powf(p, RLGM);
             return Ok(DepthOrAltitude::Altitude {
                 pressure,
@@ -418,42 +391,36 @@ impl<'a, I, P> MS5849<'a, I, P> {
     }
 }
 
-impl<'a, I, P> MS5849<'a, I, P> {
-    /// Calculate 4-bit CRC for MS5849 calibration data.
-    /// Per MS5849 datasheet, the CRC is computed over the calibration coefficients.
-    /// The CRC polynomial is 0x3 (x^4 + x^3 + 1).
-    /// The CRC value is stored in the upper 4 bits of C[0].
-    fn crc4(n_prom: &[u16; 10]) -> u8 {
-        let mut n_rem: u16 = 0;
-        let mut coeff_array: [u16; 8] = [0; 8];
+impl<I, P> MS5849<I, P> {
+    fn crc8_update(data_in: u8, crc_init: u8) -> u8 {
+        // Same CRC8 update as the C reference driver (poly 0x31).
+        let mut u_dat = data_in;
+        let mut u_rem = crc_init;
 
-        // Copy first 8 coefficients and mask CRC from C[0]
-        coeff_array[0] = n_prom[0] & 0x0FFF;
-        for i in 1..8 {
-            coeff_array[i] = n_prom[i];
-        }
-
-        // CRC calculation: 16 iterations, 2 bytes per iteration
-        for i in 0..16 {
-            // Extract byte (MSB on even iterations, LSB on odd)
-            let byte = if i % 2 == 1 {
-                (coeff_array[i >> 1] & 0x00FF) as u16
-            } else {
-                (coeff_array[i >> 1] >> 8) as u16
-            };
-            n_rem ^= byte;
-
-            // Process each of 8 bits
-            for _n_bit in (1..=8).rev() {
-                if n_rem & 0x8000 != 0 {
-                    n_rem = (n_rem << 1) ^ 0x3000;
-                } else {
-                    n_rem = n_rem << 1;
-                }
+        for _ in 0..8 {
+            let msb_dat = u_dat >> 7;
+            let msb_rem = u_rem >> 7;
+            u_dat <<= 1;
+            u_rem <<= 1;
+            if msb_dat != msb_rem {
+                u_rem ^= 0x31;
             }
         }
 
-        // Return upper 4 bits of remainder
-        ((n_rem >> 12) & 0x000F) as u8
+        u_rem
+    }
+
+    /// Calculate CRC8 over full PROM data:
+    /// words[0..14] (all bytes) + word[15] high byte (product_id),
+    /// excluding the stored CRC byte in word[15] low byte.
+    fn prom_crc8(prom: &[u16; 16]) -> u8 {
+        let mut crc: u8 = 0;
+
+        for &word in prom.iter().take(15) {
+            crc = Self::crc8_update((word >> 8) as u8, crc);
+            crc = Self::crc8_update(word as u8, crc);
+        }
+
+        Self::crc8_update((prom[15] >> 8) as u8, crc)
     }
 }

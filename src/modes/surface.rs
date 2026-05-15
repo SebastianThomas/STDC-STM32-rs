@@ -65,10 +65,8 @@ where
     <I as Write>::Error: Debug,
     <I as WriteRead>::Error: Debug,
 {
-    rprintln!("Getting current time");
     let millis_since = millis_tim2_since(state.last_polled_millis);
     if millis_since < SURFACE_POLL_INTERVAL_MILLIS {
-        rprintln!("Current measurements are up to date: {} ms", millis_since);
         return None;
     }
     rprintln!(
@@ -91,8 +89,6 @@ where
         temperature_c,
         current_measurement_millis,
     );
-
-    rprintln!("Somethin");
 
     let next_flash_iter = state
         .flash_log_algorithm

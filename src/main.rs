@@ -42,7 +42,7 @@ use stdc_stm32_rs::{
         uart_log::{ExternalLogger, UartLogger},
     },
     concat_any_bytes,
-    stm32::{Mono, TIM5_INPUT_CLOCK, noop_waker},
+    stm32::{Mono, noop_waker},
 };
 
 mod modes;
@@ -61,7 +61,7 @@ static BLUETOOTH_NAME: [u8; 8] = concat_any_bytes!(b"STDC", SERIAL_NUMBER);
 
 const INITIAL_FLASH_ADDRESS: u32 = 1 << 21;
 const STOP2_SURFACE_SLEEP_SECONDS: u32 = 2;
-const BATTERY_UPDATE_INTERVAL_MILLIS: u32 = 5_000; // TODO: Change back 30_000;
+const BATTERY_UPDATE_INTERVAL_MILLIS: u32 = 30_000;
 const BLUETOOTH_TASK_DELAY_MILLIS: u64 = 200;
 
 const GASES: [GasMix<f32>; 1] = [gas::AIR];
@@ -71,6 +71,10 @@ fn flash_log_bytes(bytes: &[u8]) {
 }
 fn sensor_log_bytes(_bytes: &[u8]) {}
 
+#[cfg(not(feature = "online_benchmarking"))]
+fn log_tim5_state(_: &str) {}
+
+#[cfg(feature = "online_benchmarking")]
 fn log_tim5_state(tag: &str) {
     let tim5 = unsafe { &*pac::TIM5::ptr() };
     let rcc = unsafe { &*pac::RCC::ptr() };
@@ -98,6 +102,19 @@ fn log_tim5_state(tag: &str) {
         tim5.psc.read().bits(),
         tim5.arr.read().bits(),
     );
+}
+
+fn resync_tim5_after_long_init() {
+    let tim5 = unsafe { &*pac::TIM5::ptr() };
+
+    // During RTIC init, global interrupts are disabled. If TIM5 runs for a long time,
+    // UIF/CCIF flags can accumulate and trip monotonic missed-interrupt assertions once
+    // interrupts are enabled. Reset TIM5 counter/flags right before leaving init.
+    tim5.cr1.modify(|_, w| w.cen().clear_bit());
+    tim5.cnt.write(|w| unsafe { w.bits(1) });
+    tim5.sr.write(|w| unsafe { w.bits(0) });
+    cortex_m::peripheral::NVIC::unpend(pac::Interrupt::TIM5);
+    tim5.cr1.modify(|_, w| w.cen().set_bit());
 }
 
 static POWER_CUT_RED_INDICATOR: CmMutex<RefCell<Option<Pc9Output>>> =
@@ -365,6 +382,7 @@ mod app {
             }
         }
         modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
+        sync_power_cut_indicator();
         let _ = flash.write(&SERIAL_NUMBER);
         modes::power_cut_mark_safe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
         sync_power_cut_indicator();
@@ -450,6 +468,10 @@ mod app {
 
         // Active-low indicator: start with LED off until Dive mode is entered.
         let _ = dive_mode_indicator.set_high();
+
+        log_tim5_state("Before TIM5 resync");
+        resync_tim5_after_long_init();
+        log_tim5_state("After TIM5 resync");
 
         modes::power_cut_mark_safe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
 
@@ -682,11 +704,9 @@ mod app {
             match result {
                 TaskModeTickResult::DirectContinue => {}
                 TaskModeTickResult::Delay { name, duration } => {
-                    rprintln!("Delay name {} for {}", name, duration);
                     // let (_, sample) = benchmarking::measure_async(name, Mono::delay(duration)).await;
                     // benchmarking::log_sample(&sample);
                     Mono::delay(duration).await;
-                    rprintln!("After Delay");
                 }
                 // TODO: Reenable STOP2 once it works with delay
                 TaskModeTickResult::EnterStop2 => {
@@ -696,8 +716,7 @@ mod app {
                     // Allow scheduling of other tasks to avoid starving with this loop
                     // Mono::delay(1u64.micros()).await;
 
-                    Mono::delay(500u64.micros()).await;
-                    rprintln!("After Delay");
+                    Mono::delay(500u64.millis()).await;
                 }
             }
         }
@@ -863,10 +882,8 @@ pub fn sync_power_cut_indicator() {
     free(|cs| {
         if let Some(red_indicator) = POWER_CUT_RED_INDICATOR.borrow(cs).borrow_mut().as_mut() {
             if modes::is_power_cut_safe() {
-                rprintln!("Syncing power cut indicator, off");
                 let _ = red_indicator.set_high();
             } else {
-                rprintln!("Syncing power cut indicator, on");
                 let _ = red_indicator.set_low();
             }
         }

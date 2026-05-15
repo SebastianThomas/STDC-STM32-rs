@@ -9,7 +9,7 @@ use stm32l4xx_hal::hal::blocking::spi;
 use stdc_diving_algorithms::pressure_unit::{Bar, Pa, Pressure, mBar, msw};
 
 use crate::constants::barometric::{
-    ALT_PER_FOOT, DepthOrAltitude, FEET_TO_METERS, KG_M2_FRESH_WATER, RLGM,
+    ALT_PER_FOOT, DepthOrAltitude, FEET_TO_METERS, KG_M2_FRESH_WATER, RLGM, SURFACE_PA,
 };
 use crate::protocols::spi::{spi_read_register, spi_write_delay};
 use crate::stm32::Mono;
@@ -226,27 +226,19 @@ where
     }
 
     pub async fn read_i2c(&mut self) {
-        // Request D1 conversion
-        rprintln!("MS5849 read_i2c: request D1 conversion");
         write_i2c(
             &mut self.interface,
             MS5849_I2C_ADDR,
             &[MS5849_CONVERT_D1_8192],
         );
 
-        // Request D2 conversion
-        rprintln!("MS5849 read_i2c: request D2 conversion");
         write_i2c(
             &mut self.interface,
             MS5849_I2C_ADDR,
             &[MS5849_CONVERT_D2_8192],
         );
 
-        rprintln!("MS5849 read_i2c: waiting on Mono for 20ms");
-
         Mono::delay(20u64.millis()).await; // Max conversion time per datasheet
-
-        rprintln!("MS5849 read_i2c: Mono delay completed");
 
         let buf: [u8; 3] = write_read_i2c(&mut self.interface, MS5849_I2C_ADDR, MS5849_ADC_READ_D1);
         let d1_pres = (buf[0] as u32) << 16 | (buf[1] as u32) << 8 | buf[2] as u32;
@@ -381,7 +373,7 @@ impl<I, P> MS5849<I, P> {
                 depth: msw(depth),
             });
         } else {
-            let p = pressure / surf_ref;
+            let p = pressure / SURFACE_PA; // Not surf_ref - actual absolute altitude
             let ratio = 1.0 - powf(p, RLGM);
             return Ok(DepthOrAltitude::Altitude {
                 pressure,

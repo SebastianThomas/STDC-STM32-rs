@@ -69,6 +69,8 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
         }
     }
 
+    /// Delegate to the slice-based multi-page writer. This allows writes
+    /// that cross page boundaries. Note: multi-page writes are NOT atomic
     pub fn write_bytes<const BYTES: usize>(
         &mut self,
         addr: u32,
@@ -79,28 +81,17 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
         [(); BYTES + 0]:,
         [(); 4 + BYTES + 0]:,
     {
-        let offset = addr % PAGE_SIZE;
-        // let base = addr - offset;
-        if PAGE_SIZE - offset < BYTES as u32 {
-            return Err(SpiError::new(
-                0,
-                "Not enough space on current page to write bytes.",
-            ));
-        }
-        self.write_enable(true)?;
-        let res = self.program_page(addr, bytes);
-        let write_res = self.write_enable(false);
-        if let Err(e) = res { Err(e) } else { write_res }
+        self.write_bytes_slice(addr, bytes.as_slice())
     }
 
     pub fn read_bytes<const BYTES: usize>(&mut self, addr: u32) -> Result<[u8; BYTES], SpiError>
     where
         [(); 4 + BYTES]:,
     {
-        let mut buf = [0u8; 4];
-        buf[0] = READ_DATA_INSTRUCTION;
-        buf[1..=3].copy_from_slice(&get_24bit_addr(addr));
-        self.spi_io_operation::<4, { BYTES }>(&buf)
+        let mut out = [0u8; BYTES];
+        // Use chunked reader to support arbitrarily large reads.
+        self.read_bytes_slice(addr, &mut out)?;
+        Ok(out)
     }
 
     pub fn erase_chip(&mut self) -> Result<(), SpiError> {
@@ -158,24 +149,6 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
 
     fn write_enable(&mut self, enable: bool) -> Result<(), SpiError> {
         self.spi_write_operation(&[WRITE_ENABLE_INSTRUCTION | (enable as u8) << 1])
-    }
-
-    fn program_page<const BYTES: usize>(
-        &mut self,
-        addr: u32,
-        bytes: &[u8; BYTES],
-    ) -> Result<(), SpiError>
-    where
-        [(); 4 + BYTES]: Sized,
-        [(); 4 + BYTES + 0]: Sized,
-        [(); BYTES + 0]: Sized,
-    {
-        let mut buf: [u8; 4 + BYTES] = [0; 4 + BYTES];
-        let addr_buf = get_24bit_addr(addr);
-        buf[0] = PAGE_PROGRAM_INSTRUCTION;
-        buf[1..=3].copy_from_slice(&addr_buf);
-        buf[4..=3 + BYTES].copy_from_slice(bytes);
-        self.spi_write_operation::<{ 4 + BYTES }>(&buf)
     }
 
     /**
@@ -255,6 +228,118 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
         };
 
         res
+    }
+}
+
+impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFlash<SPI, CSPin, L> {
+    /// Write an arbitrary-length buffer to the flash, splitting across page
+    /// boundaries as necessary. This is not atomic: if an error occurs part
+    /// way through, earlier pages may already be programmed.
+    pub fn write_bytes_slice(&mut self, mut addr: u32, mut data: &[u8]) -> Result<(), SpiError> {
+        while !data.is_empty() {
+            let offset = (addr % PAGE_SIZE) as usize;
+            let space = (PAGE_SIZE as usize) - offset;
+            let write_len = data.len().min(space);
+
+            // Enable writes for this page, send program command + address, then write data.
+            self.write_enable(true)?;
+
+            // CS Low
+            if let Err(_) = self.chip_select_pin.set_low() {
+                let msg = "Failed setting CS to low";
+                let _ = (self.logger)(msg.as_bytes());
+                return Err(SpiError::new(1, msg));
+            }
+
+            let addr_buf = get_24bit_addr(addr);
+            let header = [
+                PAGE_PROGRAM_INSTRUCTION,
+                addr_buf[0],
+                addr_buf[1],
+                addr_buf[2],
+            ];
+            if let Err(_) = self.spi.write(&header) {
+                let msg = "Failed executing write operation (header)";
+                let _ = (self.logger)(msg.as_bytes());
+                let _ = self.chip_select_pin.set_high();
+                return Err(SpiError::new(0, msg));
+            }
+
+            if let Err(_) = self.spi.write(&data[..write_len]) {
+                let msg = "Failed executing write operation (data)";
+                let _ = (self.logger)(msg.as_bytes());
+                let _ = self.chip_select_pin.set_high();
+                return Err(SpiError::new(0, msg));
+            }
+
+            // CS High
+            if let Err(_) = self.chip_select_pin.set_high() {
+                let msg = "Failed setting CS to high";
+                let _ = (self.logger)(msg.as_bytes());
+                return Err(SpiError::new(3, msg));
+            }
+
+            // Disable write (mirror previous behavior)
+            self.write_enable(false)?;
+
+            addr = addr.wrapping_add(write_len as u32);
+            data = &data[write_len..];
+        }
+
+        Ok(())
+    }
+
+    /// Read arbitrary-length data from flash into `out`, in page-sized chunks.
+    pub fn read_bytes_slice(&mut self, mut addr: u32, out: &mut [u8]) -> Result<(), SpiError> {
+        // Chunk reads to page-size to avoid large stack buffers
+        const CHUNK_MAX: usize = 256; // PAGE_SIZE
+        let mut dest = 0usize;
+        while dest < out.len() {
+            let remaining = out.len() - dest;
+            let chunk = remaining.min(CHUNK_MAX);
+
+            // Build transfer buffer: 1-byte cmd + 3-byte addr + chunk dummy bytes
+            let mut buf = [0u8; 4 + CHUNK_MAX];
+            buf[0] = READ_DATA_INSTRUCTION;
+            let addr_buf = get_24bit_addr(addr);
+            buf[1] = addr_buf[0];
+            buf[2] = addr_buf[1];
+            buf[3] = addr_buf[2];
+            for i in 0..chunk {
+                buf[4 + i] = 0x00;
+            }
+
+            // CS Low
+            if let Err(_) = self.chip_select_pin.set_low() {
+                let msg = "Failed setting CS to low";
+                let _ = (self.logger)(msg.as_bytes());
+                return Err(SpiError::new(1, msg));
+            }
+
+            match self.spi.transfer(&mut buf[..4 + chunk]) {
+                Ok(_) => {
+                    out[dest..dest + chunk].copy_from_slice(&buf[4..4 + chunk]);
+                }
+                Err(_) => {
+                    let msg = "Failed executing rw operation";
+                    let _ = (self.logger)(msg.as_bytes());
+                    let _ = self.chip_select_pin.set_high();
+                    return Err(SpiError::new(0, msg));
+                }
+            }
+
+            // CS High
+            if let Err(_) = self.chip_select_pin.set_high() {
+                let msg = "Failed setting CS to high";
+                let _ = (self.logger)(msg.as_bytes());
+                return Err(SpiError::new(3, msg));
+            }
+
+            addr = addr.wrapping_add(chunk as u32);
+            dest += chunk;
+        }
+
+        Ok(())
     }
 }
 

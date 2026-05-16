@@ -14,8 +14,8 @@ use stdc_stm32_rs::components::spi_utils::DetailsError;
 use stdc_stm32_rs::components::{display::LedDisplay, flash::Flash, uart_log::ExternalLogger};
 
 use crate::modes::{
-    display_refresh, display_set_dive_time, display_set_stop_schedule, millis_tim2,
-    millis_tim2_since,
+    display_refresh, display_set_dive_time, display_set_stop_schedule, millis_tim5,
+    millis_tim5_since,
 };
 
 const DIVE_TIME_UPDATE_INTERVAL_MILLIS: u32 = 1_000;
@@ -43,11 +43,11 @@ pub fn update_dive_time_if_due(
     dive_start_millis: u32,
     logger: &Mutex<RefCell<impl ExternalLogger>>,
 ) -> bool {
-    if millis_tim2_since(state.last_dive_time_update_millis) < DIVE_TIME_UPDATE_INTERVAL_MILLIS {
+    if millis_tim5_since(state.last_dive_time_update_millis) < DIVE_TIME_UPDATE_INTERVAL_MILLIS {
         return false;
     }
 
-    let current_millis = millis_tim2();
+    let current_millis = millis_tim5();
     let duration_since_start =
         Duration::from_millis((current_millis.wrapping_sub(dive_start_millis)) as u64);
     display_set_dive_time(duration_since_start);
@@ -72,11 +72,11 @@ where
     [(); 4 + (24 + NUM_GASES * 3) + 0]: Sized,
     [(); 24 + NUM_GASES * 3 + 0]: Sized,
 {
-    if millis_tim2_since(state.last_deco_update_millis) < DIVE_DECO_UPDATE_INTERVAL_MILLIS {
+    if millis_tim5_since(state.last_deco_update_millis) < DIVE_DECO_UPDATE_INTERVAL_MILLIS {
         return false;
     }
 
-    state.last_deco_update_millis = millis_tim2();
+    state.last_deco_update_millis = millis_tim5();
 
     let (result, sample) = benchmarking::measure("dive.deco_schedule", || {
         calc_deco_schedule(loading, gases, deco_settings)
@@ -102,11 +102,11 @@ pub fn refresh_display_if_due<D: LedDisplay, L: ExternalLogger>(
     display: &mut D,
     logger: &Mutex<RefCell<L>>,
 ) -> bool {
-    if millis_tim2_since(state.last_display_refresh_millis) < DIVE_DISPLAY_REFRESH_INTERVAL_MILLIS {
+    if millis_tim5_since(state.last_display_refresh_millis) < DIVE_DISPLAY_REFRESH_INTERVAL_MILLIS {
         return false;
     }
 
-    state.last_display_refresh_millis = millis_tim2();
+    state.last_display_refresh_millis = millis_tim5();
 
     let (result, sample) = benchmarking::measure("dive.display_refresh", || display_refresh(display));
     benchmarking::log_sample(&sample);

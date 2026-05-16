@@ -6,7 +6,7 @@ use stdc_diving_algorithms::{
     dive::StopSchedule,
     pressure_unit::{Pa, Pressure},
 };
-use stm32l4xx_hal::{pac::TIM2, timer::Timer};
+use stm32l4xx_hal::{pac::TIM5, timer::Timer};
 
 use stdc_stm32_rs::components::display::{DisplayState, LedDisplay, MAX_STOP_NUMS};
 
@@ -64,12 +64,12 @@ pub fn display_refresh<D: LedDisplay>(display: &mut D) -> Result<(), D::Error> {
     })
 }
 
-pub fn millis_tim2() -> u32 {
-    Timer::<TIM2>::count()
+pub fn millis_tim5() -> u32 {
+    Timer::<TIM5>::count()
 }
 
-pub fn millis_tim2_since(start: u32) -> u32 {
-    Timer::<TIM2>::count().wrapping_sub(start)
+pub fn millis_tim5_since(start: u32) -> u32 {
+    Timer::<TIM5>::count().wrapping_sub(start)
 }
 
 pub fn power_cut_mark_unsafe(flag: u8) {

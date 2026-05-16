@@ -43,7 +43,7 @@ use crate::{
 };
 
 use super::{POWER_CUT_UNSAFE_FLASH_WRITE, power_cut_mark_safe, power_cut_mark_unsafe};
-use super::{display_set_depth, millis_tim2, millis_tim2_since};
+use super::{display_set_depth, millis_tim5, millis_tim5_since};
 
 const DIVE_END_TOLERANCE_MILLIS: u32 = 10_000;
 
@@ -83,7 +83,7 @@ where
     [(); 4 + (24 + NR_GASES * 3) + 0]: Sized,
     [(); 24 + NR_GASES * 3 + 0]: Sized,
 {
-    let dive_start_millis = millis_tim2();
+    let dive_start_millis = millis_tim5();
 
     let deco_settings = DecoSettings {
         gas_density_settings: GasDensitySettings::Limit {
@@ -181,10 +181,10 @@ where
     [(); 4 + (24 + NUM_GASES * 3) + 0]: Sized,
     [(); 24 + NUM_GASES * 3 + 0]: Sized,
 {
-    let current_millis = millis_tim2_since(runtime.dive_start_millis);
+    let current_millis = millis_tim5_since(runtime.dive_start_millis);
     let _ = update_dive_time_if_due(&mut runtime.task_state, runtime.dive_start_millis, logger);
 
-    let measurement_millis = millis_tim2();
+    let measurement_millis = millis_tim5();
     ms5849_i2c.read_i2c().await;
     let temperature_c = ms5849_i2c.temperature();
 

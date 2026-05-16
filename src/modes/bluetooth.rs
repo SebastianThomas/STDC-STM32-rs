@@ -14,8 +14,8 @@ use stdc_stm32_rs::components::{
 };
 
 use super::{
-    POWER_CUT_UNSAFE_FLASH_WRITE, POWER_CUT_UNSAFE_FW_TRANSFER, is_power_cut_safe, millis_tim2,
-    millis_tim2_since, power_cut_mark_safe, power_cut_mark_unsafe, power_cut_unsafe_mask,
+    POWER_CUT_UNSAFE_FLASH_WRITE, POWER_CUT_UNSAFE_FW_TRANSFER, is_power_cut_safe, millis_tim5,
+    millis_tim5_since, power_cut_mark_safe, power_cut_mark_unsafe, power_cut_unsafe_mask,
 };
 
 const BLUETOOTH_MODE_INACTIVITY_TIMEOUT_MILLIS: u32 = 20_000;
@@ -95,7 +95,7 @@ impl BluetoothModeState {
     }
 
     pub fn on_enter(&mut self) {
-        let now = millis_tim2();
+        let now = millis_tim5();
         self.entered_millis = now;
         self.last_activity_millis = now;
         self.logged_entry = false;
@@ -107,7 +107,7 @@ impl BluetoothModeState {
     }
 
     pub fn mark_activity(&mut self) {
-        self.last_activity_millis = millis_tim2();
+        self.last_activity_millis = millis_tim5();
         self.logged_timeout = false;
     }
 }
@@ -127,8 +127,8 @@ pub fn run_bluetooth_mode_tick<L: ExternalLogger>(
 
     poll_and_handle_bluetooth_rx(state, bluetooth, flash, logger);
 
-    let idle_elapsed = millis_tim2_since(state.last_activity_millis);
-    let session_elapsed = millis_tim2_since(state.entered_millis);
+    let idle_elapsed = millis_tim5_since(state.last_activity_millis);
+    let session_elapsed = millis_tim5_since(state.entered_millis);
     let inactive_timed_out = idle_elapsed >= BLUETOOTH_MODE_INACTIVITY_TIMEOUT_MILLIS;
     let session_timed_out = session_elapsed >= BLUETOOTH_MODE_MAX_SESSION_MILLIS;
     let timed_out = inactive_timed_out || session_timed_out;

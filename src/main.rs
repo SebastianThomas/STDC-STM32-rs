@@ -11,19 +11,20 @@ use core::{
 };
 
 use cortex_m::interrupt::{Mutex as CmMutex, free};
+#[cfg(feature = "online_benchmarking")]
 use cortex_m::register::primask;
+
 use cortex_m_rt::exception;
 use modes::{AppMode, SurfaceModeExit};
 use rtic_monotonics::stm32::prelude::*;
 use rtt_target::{rprintln, rtt_init_print};
 
+#[cfg(not(feature = "online_benchmarking"))]
+use stm32l4xx_hal::hal::timer::{Cancel, CountDown};
 use stm32l4xx_hal::{
-    hal::{
-        spi::MODE_0,
-        timer::{Cancel, CountDown},
-    },
+    hal::spi::MODE_0,
     i2c::{self, I2c},
-    pac::{self, TIM2},
+    pac::{self, TIM5},
     prelude::*,
     pwr::Pwr,
     rcc::{APB1R1, Clocks, PllConfig, PllDivider},
@@ -60,9 +61,11 @@ static SERIAL_NUMBER: [u8; 4] = [0, 0, 0, 0];
 static BLUETOOTH_NAME: [u8; 8] = concat_any_bytes!(b"STDC", SERIAL_NUMBER);
 
 const INITIAL_FLASH_ADDRESS: u32 = 1 << 21;
-const STOP2_SURFACE_SLEEP_SECONDS: u32 = 2;
 const BATTERY_UPDATE_INTERVAL_MILLIS: u32 = 30_000;
 const BLUETOOTH_TASK_DELAY_MILLIS: u64 = 200;
+
+#[cfg(not(feature = "online_benchmarking"))]
+const STOP2_SURFACE_SLEEP_SECONDS: u32 = 2;
 
 const GASES: [GasMix<f32>; 1] = [gas::AIR];
 
@@ -104,30 +107,16 @@ fn log_tim5_state(tag: &str) {
     );
 }
 
-fn resync_tim5_after_long_init() {
-    let tim5 = unsafe { &*pac::TIM5::ptr() };
-
-    // During RTIC init, global interrupts are disabled. If TIM5 runs for a long time,
-    // UIF/CCIF flags can accumulate and trip monotonic missed-interrupt assertions once
-    // interrupts are enabled. Reset TIM5 counter/flags right before leaving init.
-    tim5.cr1.modify(|_, w| w.cen().clear_bit());
-    tim5.cnt.write(|w| unsafe { w.bits(1) });
-    tim5.sr.write(|w| unsafe { w.bits(0) });
-    cortex_m::peripheral::NVIC::unpend(pac::Interrupt::TIM5);
-    tim5.cr1.modify(|_, w| w.cen().set_bit());
-}
-
 static POWER_CUT_RED_INDICATOR: CmMutex<RefCell<Option<Pc9Output>>> =
     CmMutex::new(RefCell::new(None));
 
-// TODO: Monotonic here?
 #[rtic::app(device = stm32l4xx_hal::pac, peripherals = true, dispatchers = [EXTI0])]
 mod app {
     use rtic_monotonics::fugit::Duration;
     use stdc_diving_algorithms::{pressure_unit::Pa, setup::NUM_TISSUES};
     use stdc_stm32_rs::{
         components::display::{LedDisplay, SpiDisplay},
-        stm32::TIM5_MONO_CLOCK,
+        stm32::TIM2_MONO_CLOCK,
     };
 
     use super::*;
@@ -190,9 +179,9 @@ mod app {
         let mut gpiob = dp.GPIOB.split(&mut ahb2);
         let mut gpioc = dp.GPIOC.split(&mut ahb2);
 
-        let clocks = init_clocks(rcc.cfgr, &mut flash_pac.acr, &mut pwr, dp.TIM2, &mut apb1r1);
+        let clocks = init_clocks(rcc.cfgr, &mut flash_pac.acr, &mut pwr, dp.TIM5, &mut apb1r1);
 
-        rprintln!("Clocks, TIM2, Delay set up");
+        rprintln!("Clocks, TIM5, Delay set up");
 
         // TODO: LSE crystal on first soldered PCB not responding (gets stuck after "RTC Config")
         //  so using LSI for now
@@ -469,10 +458,6 @@ mod app {
         // Active-low indicator: start with LED off until Dive mode is entered.
         let _ = dive_mode_indicator.set_high();
 
-        log_tim5_state("Before TIM5 resync");
-        resync_tim5_after_long_init();
-        log_tim5_state("After TIM5 resync");
-
         modes::power_cut_mark_safe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
 
         let _ = task_mode_tick::spawn();
@@ -537,10 +522,7 @@ mod app {
     enum TaskModeTickResult {
         EnterStop2,
         DirectContinue,
-        Delay {
-            name: &'static str,
-            duration: Duration<u64, 1, { TIM5_MONO_CLOCK }>,
-        },
+        Delay(Duration<u64, 1, { TIM2_MONO_CLOCK }>),
     }
 
     #[task(priority = 1, shared = [latest_measurements], local = [
@@ -564,9 +546,6 @@ mod app {
         latest_calculations_state,
     ])]
     async fn task_mode_tick(mut cx: task_mode_tick::Context) {
-        rprintln!("Delay start");
-        Mono::delay(500u64.micros()).await;
-        rprintln!("Delay finish");
         loop {
             modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
             sync_power_cut_indicator();
@@ -648,10 +627,7 @@ mod app {
                         TaskModeTickResult::DirectContinue
                     } else {
                         // TODO: Bluetooth Functionality
-                        TaskModeTickResult::Delay {
-                            name: "task.bluetooth.delay",
-                            duration: BLUETOOTH_TASK_DELAY_MILLIS.millis(),
-                        }
+                        TaskModeTickResult::Delay(BLUETOOTH_TASK_DELAY_MILLIS.millis())
                     }
                 }
                 AppMode::Dive => {
@@ -691,10 +667,7 @@ mod app {
                         transition_into_surface(cx.local.mode, cx.local.surface_mode_state);
                         TaskModeTickResult::DirectContinue
                     } else {
-                        TaskModeTickResult::Delay {
-                            name: "task.dive.delay",
-                            duration: 50_u64.millis(),
-                        }
+                        TaskModeTickResult::Delay(50_u64.millis())
                     }
                 }
             };
@@ -703,20 +676,21 @@ mod app {
             Mono::delay(500u64.millis()).await;
             match result {
                 TaskModeTickResult::DirectContinue => {}
-                TaskModeTickResult::Delay { name, duration } => {
-                    // let (_, sample) = benchmarking::measure_async(name, Mono::delay(duration)).await;
-                    // benchmarking::log_sample(&sample);
+                TaskModeTickResult::Delay(duration) => {
                     Mono::delay(duration).await;
                 }
                 // TODO: Reenable STOP2 once it works with delay
                 TaskModeTickResult::EnterStop2 => {
-                    //     rprintln!("Going to sleep");
-                    //     enter_stop2_for_surface(cx.local.rtc);
-                    //     let _ = wake_reinit::spawn();
-                    // Allow scheduling of other tasks to avoid starving with this loop
-                    // Mono::delay(1u64.micros()).await;
-
-                    Mono::delay(500u64.millis()).await;
+                    rprintln!("Going to sleep");
+                    #[cfg(not(feature = "online_benchmarking"))]
+                    {
+                        enter_stop2_for_surface(cx.local.rtc);
+                        let _ = wake_reinit::spawn();
+                        // Allow scheduling of other tasks to avoid starving with this loop
+                        Mono::delay(1u64.micros()).await;
+                    }
+                    #[cfg(feature = "online_benchmarking")]
+                    Mono::delay(1000u64.millis()).await;
                 }
             }
         }
@@ -757,7 +731,7 @@ mod app {
             rcc.cfgr,
             &mut flash_pac.acr,
             &mut pwr,
-            dp.TIM2,
+            dp.TIM5,
             &mut rcc.apb1r1,
         );
         rprintln!("Checking Delay");
@@ -771,7 +745,7 @@ fn init_clocks(
     cfgr: stm32l4xx_hal::rcc::CFGR,
     acr: &mut stm32l4xx_hal::flash::ACR,
     pwr: &mut Pwr,
-    tim2: TIM2,
+    tim5: TIM5,
     apb1r1: &mut APB1R1,
 ) -> Clocks {
     let clocks = cfgr
@@ -779,20 +753,13 @@ fn init_clocks(
         .freeze(acr, pwr);
 
     // Timer input clock = PCLK1 * 2 when APB1 prescaler > 1.
-    let tim5_clk = if clocks.pclk1() == clocks.hclk() {
+    let tim2_clk = if clocks.pclk1() == clocks.hclk() {
         clocks.pclk1()
     } else {
         clocks.pclk1() * 2
     };
-    rprintln!("TIM5 input clock: {:?} MHz", tim5_clk.to_MHz());
-    log_tim5_state("Before Mono::start");
-    Mono::start(tim5_clk.to_Hz());
-    // rtic-monotonics Tim5Backend currently operates with 16-bit tick semantics.
-    // Ensure TIM5 wraps at 0xFFFF so compare values (CCR1/CCR2) are reached as expected.
-    let tim5 = unsafe { &*pac::TIM5::ptr() };
-    tim5.arr.write(|w| unsafe { w.bits(0x0000_FFFF) });
-    tim5.egr.write(|w| w.ug().set_bit());
-    log_tim5_state("After Mono::start");
+    rprintln!("TIM2 input clock: {:?} MHz", tim2_clk.to_MHz());
+    Mono::start(tim2_clk.to_Hz());
 
     rprintln!(
         "Clocks: Sysclk: {:?}, PCLK1: {:?}, PCLK2: {:?}, HCLK: {:?}, ",
@@ -802,7 +769,7 @@ fn init_clocks(
         clocks.hclk()
     );
 
-    Timer::free_running_tim2(tim2, clocks, 1.kHz(), false, apb1r1);
+    Timer::free_running_tim5(tim5, clocks, 1.kHz(), false, apb1r1);
 
     clocks
 }
@@ -852,6 +819,7 @@ fn log_str<L: ExternalLogger>(logger: &CmMutex<RefCell<L>>, str: &str) {
     });
 }
 
+#[cfg(not(feature = "online_benchmarking"))]
 fn enter_stop2_for_surface(rtc: &mut Rtc) {
     let mut wakeup_timer = rtc.wakeup_timer();
     wakeup_timer.start(STOP2_SURFACE_SLEEP_SECONDS);

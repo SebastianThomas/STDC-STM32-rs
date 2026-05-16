@@ -17,7 +17,7 @@ use stdc_stm32_rs::{
 use crate::DEFAULT_SURFACE_PRESSURE;
 
 use super::{
-    POWER_CUT_UNSAFE_FLASH_WRITE, SurfaceModeExit, millis_tim2, millis_tim2_since,
+    POWER_CUT_UNSAFE_FLASH_WRITE, SurfaceModeExit, millis_tim5, millis_tim5_since,
     power_cut_mark_safe, power_cut_mark_unsafe,
 };
 
@@ -50,7 +50,7 @@ impl SurfaceModeState {
      * Ensure task due on next tick
      */
     fn get_last_polled_millis_for_now() -> u32 {
-        millis_tim2().wrapping_sub(SURFACE_POLL_INTERVAL_MILLIS)
+        millis_tim5().wrapping_sub(SURFACE_POLL_INTERVAL_MILLIS)
     }
 }
 
@@ -65,7 +65,7 @@ where
     <I as Write>::Error: Debug,
     <I as WriteRead>::Error: Debug,
 {
-    let millis_since = millis_tim2_since(state.last_polled_millis);
+    let millis_since = millis_tim5_since(state.last_polled_millis);
     if millis_since < SURFACE_POLL_INTERVAL_MILLIS {
         return None;
     }
@@ -73,7 +73,7 @@ where
         "Updating measurements (not up to date: {} ms)",
         millis_since
     );
-    let current_measurement_millis = millis_tim2();
+    let current_measurement_millis = millis_tim5();
     ms5849_i2c.read_i2c().await;
     let pressure = match ms5849_i2c.current_pressure_pa() {
         Some(p) => p,

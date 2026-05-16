@@ -1,12 +1,12 @@
 use core::task::{RawWaker, RawWakerVTable, Waker};
-use rtic_monotonics::stm32_tim5_monotonic;
+use rtic_monotonics::stm32_tim2_monotonic;
 
 // Keep this moderate: with the current blocking workloads inside async task execution,
 // a very high monotonic tick rate can cause half-period ISR starvation and trigger
 // `Monotonic must have missed an interrupt!` asserts in rtic-monotonics.
-pub const TIM5_MONO_CLOCK: u32 = 1_000;
+pub const TIM2_MONO_CLOCK: u32 = 1_000;
 
-stm32_tim5_monotonic!(Mono, TIM5_MONO_CLOCK);
+stm32_tim2_monotonic!(Mono, TIM2_MONO_CLOCK);
 
 pub fn noop_waker() -> Waker {
     unsafe fn no_op(_: *const ()) {}

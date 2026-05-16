@@ -9,12 +9,13 @@ use stdc_diving_algorithms::{
 use stm32l4xx_hal::{pac::TIM5, timer::Timer};
 
 use stdc_stm32_rs::components::display::{DisplayState, LedDisplay, MAX_STOP_NUMS};
-
+#[cfg(feature = "bluetooth")]
 pub mod bluetooth;
 pub mod dive;
 pub mod surface;
 
 pub const POWER_CUT_UNSAFE_TASK_RUNNING: u8 = 1 << 0;
+#[cfg(feature = "bluetooth")]
 pub const POWER_CUT_UNSAFE_FW_TRANSFER: u8 = 1 << 1;
 pub const POWER_CUT_UNSAFE_FLASH_WRITE: u8 = 1 << 2;
 
@@ -24,12 +25,14 @@ static POWER_CUT_UNSAFE_MASK: AtomicU8 = AtomicU8::new(0);
 pub enum AppMode {
     Surface,
     Dive,
+    #[cfg(feature = "bluetooth")]
     Bluetooth,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SurfaceModeExit {
     Dive(Pa),
+    #[cfg(feature = "bluetooth")]
     Bluetooth(Pa),
 }
 

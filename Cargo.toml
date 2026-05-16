@@ -36,6 +36,8 @@ path = "src/main.rs"
 test = false
 
 [features]
-default = ["lin_exp"]
+default = ["lin_exp", "display"]
 lin_exp = ["stdc_diving_algorithms/lin_exp"]
 online_benchmarking = []
+display = []
+bluetooth = []

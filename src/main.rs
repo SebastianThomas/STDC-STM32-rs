@@ -39,6 +39,7 @@ use stdc_stm32_rs::{
     components::{
         MS5849,
         battery_status::{BatteryStatusI2C, Max17262Variant},
+        display::*,
         flash::{Flash, SpiFlash},
         uart_log::{ExternalLogger, UartLogger},
     },
@@ -56,12 +57,14 @@ use stdc_diving_algorithms::{
 };
 pub use types::*;
 
+#[cfg(feature = "bluetooth")]
 const ENABLE_BLUETOOTH: bool = true;
 static SERIAL_NUMBER: [u8; 4] = [0, 0, 0, 0];
 static BLUETOOTH_NAME: [u8; 8] = concat_any_bytes!(b"STDC", SERIAL_NUMBER);
 
 const INITIAL_FLASH_ADDRESS: u32 = 1 << 21;
 const BATTERY_UPDATE_INTERVAL_MILLIS: u32 = 30_000;
+#[cfg(feature = "bluetooth")]
 const BLUETOOTH_TASK_DELAY_MILLIS: u64 = 200;
 
 #[cfg(not(feature = "online_benchmarking"))]
@@ -114,10 +117,7 @@ static POWER_CUT_RED_INDICATOR: CmMutex<RefCell<Option<Pc9Output>>> =
 mod app {
     use rtic_monotonics::fugit::Duration;
     use stdc_diving_algorithms::{pressure_unit::Pa, setup::NUM_TISSUES};
-    use stdc_stm32_rs::{
-        components::display::{LedDisplay, SpiDisplay},
-        stm32::TIM2_MONO_CLOCK,
-    };
+    use stdc_stm32_rs::stm32::TIM2_MONO_CLOCK;
 
     use super::*;
 
@@ -132,6 +132,7 @@ mod app {
         dive_mode_indicator: Pc8Output,
         mode_surface_pressure: Pa,
         surface_mode_state: modes::surface::SurfaceModeState,
+        #[cfg(feature = "bluetooth")]
         bluetooth_mode_state: modes::bluetooth::BluetoothModeState,
         rtc: Rtc,
         display: DisplayDevice,
@@ -302,21 +303,7 @@ mod app {
             clocks,
             &mut apb2,
         );
-        let mut display = SpiDisplay::new(display_en, display_spi, spi_reset, not_data_command);
-        // match display.turn_on() {
-        //     Ok(_) => log_bytes(&logger, b"Turned on the display."),
-        //     Err(e) => {
-        //         log_bytes(&logger, b"Failed to turn on the display");
-        //         log_bytes(&logger, e.details.as_bytes());
-        //     }
-        // }
-        // match display.show_splashscreen(&BLUETOOTH_NAME) {
-        //     Ok(_) => log_bytes(&logger, b"Showing Splash Screen"),
-        //     Err(e) => {
-        //         log_bytes(&logger, b"Failed to show the Splash Screen");
-        //         log_bytes(&logger, e.details.as_bytes());
-        //     }
-        // }
+        let display = create_display(display_en, display_spi, spi_reset, not_data_command);
         log_str(logger, "Display finished setting up");
 
         let mut flash_cs_nss = gpiob
@@ -463,6 +450,7 @@ mod app {
         let _ = task_mode_tick::spawn();
         let _ = task_battery_update::spawn();
 
+        #[cfg(feature = "bluetooth")]
         let bluetooth_mode_state: modes::bluetooth::BluetoothModeState =
             modes::bluetooth::BluetoothModeState::new();
 
@@ -477,6 +465,7 @@ mod app {
                 dive_mode_indicator,
                 mode_surface_pressure: start_surface_pressure,
                 surface_mode_state: modes::surface::SurfaceModeState::new(),
+                #[cfg(feature = "bluetooth")]
                 bluetooth_mode_state,
                 rtc,
                 display,
@@ -530,6 +519,7 @@ mod app {
         dive_mode_indicator,
         mode_surface_pressure,
         surface_mode_state,
+        #[cfg(feature = "bluetooth")]
         bluetooth_mode_state,
         ms5849_i2c,
         display,
@@ -592,6 +582,7 @@ mod app {
                             ));
                             TaskModeTickResult::DirectContinue
                         }
+                        #[cfg(feature = "bluetooth")]
                         Some(SurfaceModeExit::Bluetooth(surface_pressure)) => {
                             *cx.local.mode_surface_pressure = surface_pressure;
                             *cx.local.mode = AppMode::Bluetooth;
@@ -604,6 +595,7 @@ mod app {
                         }
                     }
                 }
+                #[cfg(feature = "bluetooth")]
                 AppMode::Bluetooth => {
                     let bluetooth_ready = modes::bluetooth::ensure_bluetooth_initialized(
                         cx.local.clocks,
@@ -799,6 +791,44 @@ fn create_battery_status(battery_gauge_i2c: BatteryI2c) -> BatteryGauge {
         };
         // TODO: Insert Delay or so here
     }
+}
+
+#[cfg(not(feature = "display"))]
+fn create_display<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin>(
+    display_en: EN,
+    display_spi: Spi<SPI, PINS>,
+    spi_reset: RST,
+    not_data_command: NDC,
+) -> SpiDisplay<SPI, PINS, EN, RST, NDC> {
+    SpiDisplay::new(display_en, display_spi, spi_reset, not_data_command)
+}
+
+#[cfg(feature = "display")]
+fn create_display<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin>(
+    display_en: EN,
+    display_spi: Spi<SPI, PINS>,
+    spi_reset: RST,
+    not_data_command: NDC,
+) -> SpiDisplay<SPI, PINS, EN, RST, NDC>
+where
+    Spi<SPI, PINS>: _embedded_hal_blocking_spi_Write<u8>,
+{
+    let mut display = SpiDisplay::new(display_en, display_spi, spi_reset, not_data_command);
+    match display.turn_on() {
+        Ok(_) => rprintln!("Turned on the display."),
+        Err(e) => {
+            rprintln!("Failed to turn on the display");
+            rprintln!("{:?}", e.details.as_bytes());
+        }
+    }
+    match display.show_splashscreen(&BLUETOOTH_NAME) {
+        Ok(_) => rprintln!("Showing Splash Screen"),
+        Err(e) => {
+            rprintln!("Failed to show the Splash Screen");
+            rprintln!("{:?}", e.details.as_bytes());
+        }
+    }
+    display
 }
 
 fn transition_into_surface(

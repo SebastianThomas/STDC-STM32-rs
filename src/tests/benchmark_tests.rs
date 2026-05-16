@@ -304,8 +304,9 @@ fn generate_profile_large(count: usize) -> Vec<DiveMeasurement<Pa>> {
 }
 
 fn generate_profile_deep(count: usize) -> Vec<DiveMeasurement<Pa>> {
-    const surface: Pa = Pa::new(101_325.0);
-    const bottom_depth_delta: Pa = Bar::new(9.0).to_pa();
+    const SURFACE: Pa = Pa::new(101_325.0);
+    // Bar difference from surface to bottom
+    const BOTTOM_DEPTH_DELTA: Pa = Bar::new(9.0).to_pa();
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         let phase = (i % 320) as f32 / 319.0;
@@ -317,7 +318,7 @@ fn generate_profile_deep(count: usize) -> Vec<DiveMeasurement<Pa>> {
             (1.0 - phase) / 0.5
         };
         out.push(DiveMeasurement {
-            depth: surface + Pa::new(depth_factor * bottom_depth_delta.to_pa().to_f32()),
+            depth: SURFACE + Pa::new(depth_factor * BOTTOM_DEPTH_DELTA.to_pa().to_f32()),
             time_ms: i * 1_000,
             gas: 0,
         });

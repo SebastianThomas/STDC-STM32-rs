@@ -25,15 +25,11 @@ static POWER_CUT_UNSAFE_MASK: AtomicU8 = AtomicU8::new(0);
 pub enum AppMode {
     Surface,
     Dive,
-    #[cfg(feature = "bluetooth")]
-    Bluetooth,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SurfaceModeExit {
     Dive(Pa),
-    #[cfg(feature = "bluetooth")]
-    Bluetooth(Pa),
 }
 
 pub static DISPLAY_STATE: Mutex<RefCell<DisplayState>> =

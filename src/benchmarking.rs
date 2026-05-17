@@ -204,4 +204,3 @@ pub fn log_samples(samples: &[BenchmarkSample]) {
 pub fn nanos_per_cycle(cycles: u64, clock_hz: u64) -> u64 {
     cycles.saturating_mul(1_000_000_000) / clock_hz
 }
-

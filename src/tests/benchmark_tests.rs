@@ -10,11 +10,13 @@ use stdc_diving_algorithms::{
 use crate::{
     algorithms::rate_algorithm::{DynamicDiffAimdRateAlgorithm, RateAlgorithm},
     benchmarking::{self, BenchmarkSample},
-    dive_log_host::{DecoAlgorithmType, LevelState, LogDiveControlDataBlock, LogPointData, LogPointMetadata},
+    dive_log_host::{
+        DecoAlgorithmType, LevelState, LogDiveControlDataBlock, LogPointData, LogPointMetadata,
+    },
 };
 
-use std::vec::Vec;
 use std::sync::Mutex;
+use std::vec::Vec;
 
 static REPORT_PRINT_LOCK: Mutex<()> = Mutex::new(());
 
@@ -32,7 +34,14 @@ fn print_title(title: &str) {
     print_rule();
 }
 
-fn stats_row(label: &str, count: usize, min_nanos: u64, median_nanos: u64, avg_nanos: u64, max_nanos: u64) {
+fn stats_row(
+    label: &str,
+    count: usize,
+    min_nanos: u64,
+    median_nanos: u64,
+    avg_nanos: u64,
+    max_nanos: u64,
+) {
     print_row(&format!(
         "{:<24} | {:<6} | {:<12} | {:<12} | {:<12} | {:<12}",
         label,
@@ -70,7 +79,14 @@ fn print_sample_stats(label: &str, samples: &[BenchmarkSample]) {
         nanos[nanos.len() / 2]
     };
 
-    stats_row(label, samples.len(), min_nanos, median_nanos, avg_nanos, max_nanos);
+    stats_row(
+        label,
+        samples.len(),
+        min_nanos,
+        median_nanos,
+        avg_nanos,
+        max_nanos,
+    );
 }
 
 fn print_single_sample(sample: &BenchmarkSample) {
@@ -99,8 +115,12 @@ fn benchmark_dive_profile(name: &'static str, measurements: &[DiveMeasurement<Pa
         max_deco_po2: Bar::new(1.6).to_pa(),
     };
 
-    let mut window_reports: Vec<(usize, Vec<BenchmarkSample>, Vec<BenchmarkSample>, Vec<BenchmarkSample>)> =
-        Vec::new();
+    let mut window_reports: Vec<(
+        usize,
+        Vec<BenchmarkSample>,
+        Vec<BenchmarkSample>,
+        Vec<BenchmarkSample>,
+    )> = Vec::new();
     for window_size in WINDOW_SIZES {
         let mut loading = TissuesLoading::<NUM_TISSUES, Pa>::new(surface, &AIR);
         let mut window_rate = DynamicDiffAimdRateAlgorithm::<Pa>::new::<3, 4>(
@@ -216,7 +236,8 @@ fn benchmark_dive_profile(name: &'static str, measurements: &[DiveMeasurement<Pa
         &gases,
         DecoAlgorithmType::LinearExponential,
     );
-    let (_, control_sample) = benchmarking::measure("log.control.serialize", || control_block.raw_bytes());
+    let (_, control_sample) =
+        benchmarking::measure("log.control.serialize", || control_block.raw_bytes());
     assert!(control_sample.nanos > 0 || control_sample.cycles > 0);
 
     let point = LogPointData::new(
@@ -249,7 +270,10 @@ fn benchmark_dive_profile(name: &'static str, measurements: &[DiveMeasurement<Pa
         print_sample_stats("rate.algorithm.window", rate_samples);
         print_rule();
     }
-    print_row(&format!("{:<24} | {:<14} | {:<14}", "single metric", "cycles", "time"));
+    print_row(&format!(
+        "{:<24} | {:<14} | {:<14}",
+        "single metric", "cycles", "time"
+    ));
     print_rule();
     print_single_sample(&rate_sample);
     print_single_sample(&o2_sample);

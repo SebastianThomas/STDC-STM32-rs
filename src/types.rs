@@ -16,7 +16,6 @@ use stdc_stm32_rs::{
         bluetooth::UartBluetoothModule,
         display::SpiDisplay,
         flash::SpiFlash,
-        uart_log::UartLogger,
     },
     constants::barometric::SURFACE_PA,
 };
@@ -25,8 +24,6 @@ pub type DelayMutex = CmMutex<RefCell<Delay>>;
 
 pub type DebugTx = stm32l4xx_hal::serial::Tx<pac::USART1>;
 pub type DebugRx = stm32l4xx_hal::serial::Rx<pac::USART1>;
-pub type DebugLogger = UartLogger<DebugTx, DebugRx>;
-pub type LoggerMutex = CmMutex<RefCell<DebugLogger>>;
 
 pub type Pb6I2c1Scl = stm32l4xx_hal::gpio::Pin<
     stm32l4xx_hal::gpio::Alternate<stm32l4xx_hal::gpio::OpenDrain, 4>,
@@ -135,13 +132,19 @@ pub type Pb15Spi2Mosi = stm32l4xx_hal::gpio::Pin<
 >;
 pub type FlashSpiPins = (Pb13Spi2Sck, Pb14Spi2Miso, Pb15Spi2Mosi);
 pub type FlashSpiBus = Spi<pac::SPI2, FlashSpiPins>;
-pub type FlashDevice = SpiFlash<FlashSpiBus, Pb12Output, fn(&[u8]) -> ()>;
+pub type FlashDevice = SpiFlash<FlashSpiBus, Pb12Output>;
 
 pub type Pb2InputPullDown = stm32l4xx_hal::gpio::Pin<
     stm32l4xx_hal::gpio::Input<stm32l4xx_hal::gpio::PullDown>,
     stm32l4xx_hal::gpio::L8,
     'B',
     2,
+>;
+pub type Pa1InputPullUp = stm32l4xx_hal::gpio::Pin<
+    stm32l4xx_hal::gpio::Input<stm32l4xx_hal::gpio::PullUp>,
+    stm32l4xx_hal::gpio::L8,
+    'A',
+    1,
 >;
 pub type Pb10Usart3Tx = stm32l4xx_hal::gpio::Pin<
     stm32l4xx_hal::gpio::Alternate<stm32l4xx_hal::gpio::PushPull, 7>,
@@ -187,12 +190,12 @@ impl LatestMeasurements {
     }
 
     pub fn record_environment(
-        &mut self,
+        mut self,
         pressure: Pa,
         depth: Option<msw>,
         temperature_c: Option<f32>,
         taken_millis: u32,
-    ) {
+    ) -> Self {
         self.pressure = Some(Timestamped {
             value: pressure,
             taken_millis,
@@ -205,6 +208,8 @@ impl LatestMeasurements {
             value,
             taken_millis,
         });
+
+        self
     }
 
     pub fn record_battery(&mut self, battery: BatterySnapshot, taken_millis: u32) {
@@ -261,7 +266,7 @@ pub struct LatestO2CalculationsState {
     pub o2_tox_single: O2ToxicityPercentage,
     pub o2_tox_daily: O2ToxicityPercentage,
     pub measurements_since_o2_calc: [DiveMeasurement<Pa>; MEASUREMENT_BUFFER_SIZE],
-    pub nr_measurementss_since_o2_calc: usize,
+    pub nr_measurements_since_o2_calc: usize,
 }
 
 impl<const NUM_TISSUES: usize, P: const AbsPressure> LatestCalculationsState<NUM_TISSUES, P> {
@@ -275,7 +280,7 @@ impl<const NUM_TISSUES: usize, P: const AbsPressure> LatestCalculationsState<NUM
                     depth: Pa::new(0.0),
                     gas: usize::MAX,
                 }; MEASUREMENT_BUFFER_SIZE],
-                nr_measurementss_since_o2_calc: 0,
+                nr_measurements_since_o2_calc: 0,
             },
             tissue_loadings: TissuesLoading::new(ambient, &gas::AIR),
         }

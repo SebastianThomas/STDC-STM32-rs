@@ -1,7 +1,5 @@
-use core::cell::RefCell;
 use core::fmt::Write;
 
-use cortex_m::interrupt::{Mutex, free};
 use heapless::String;
 use rtt_target::rprintln;
 use stm32l4xx_hal::{pac, prelude::*, serial::Serial};
@@ -10,7 +8,6 @@ use stdc_stm32_rs::components::{
     bluetooth::BluetoothModule as BluetoothIo,
     dive_log::{LogDiveControlDataBlock, LogPointData},
     flash::Flash,
-    uart_log::ExternalLogger,
 };
 
 use super::{
@@ -112,20 +109,19 @@ impl BluetoothModeState {
     }
 }
 
-pub fn run_bluetooth_mode_tick<L: ExternalLogger>(
+pub fn run_bluetooth_mode_tick(
     state: &mut BluetoothModeState,
     bluetooth: &mut crate::BluetoothModule,
     flash: &mut crate::FlashDevice,
-    logger: &Mutex<RefCell<L>>,
 ) -> bool {
     if !state.logged_entry {
-        log_bytes(logger, b"Bluetooth mode entered");
+        rprintln!("Bluetooth mode entered");
         rprintln!("Bluetooth mode entered");
         let _ = bluetooth.write_bytes(b"READY\r\n");
         state.logged_entry = true;
     }
 
-    poll_and_handle_bluetooth_rx(state, bluetooth, flash, logger);
+    poll_and_handle_bluetooth_rx(state, bluetooth, flash);
 
     let idle_elapsed = millis_tim5_since(state.last_activity_millis);
     let session_elapsed = millis_tim5_since(state.entered_millis);
@@ -135,10 +131,8 @@ pub fn run_bluetooth_mode_tick<L: ExternalLogger>(
 
     if timed_out && !state.logged_timeout {
         if session_timed_out {
-            log_bytes(logger, b"Bluetooth mode exiting due to session timeout");
             rprintln!("Bluetooth mode exiting due to session timeout");
         } else {
-            log_bytes(logger, b"Bluetooth mode exiting due to inactivity timeout");
             rprintln!("Bluetooth mode exiting due to inactivity timeout");
         }
         state.logged_timeout = true;
@@ -147,11 +141,10 @@ pub fn run_bluetooth_mode_tick<L: ExternalLogger>(
     timed_out
 }
 
-fn poll_and_handle_bluetooth_rx<L: ExternalLogger>(
+fn poll_and_handle_bluetooth_rx(
     state: &mut BluetoothModeState,
     bluetooth: &mut crate::BluetoothModule,
     flash: &mut crate::FlashDevice,
-    logger: &Mutex<RefCell<L>>,
 ) {
     for _ in 0..MAX_RX_BYTES_PER_TICK {
         let byte = match bluetooth.try_read_byte() {
@@ -174,7 +167,7 @@ fn poll_and_handle_bluetooth_rx<L: ExternalLogger>(
             let mut line = [0u8; MAX_COMMAND_LINE_BYTES];
             line[..line_len].copy_from_slice(&state.command_line_buf[..line_len]);
             let line_bytes = &line[..line_len];
-            handle_command_line(state, line_bytes, bluetooth, flash, logger);
+            handle_command_line(state, line_bytes, bluetooth, flash);
             state.command_line_len = 0;
             continue;
         }
@@ -194,12 +187,11 @@ fn poll_and_handle_bluetooth_rx<L: ExternalLogger>(
     }
 }
 
-fn handle_command_line<L: ExternalLogger>(
+fn handle_command_line(
     state: &mut BluetoothModeState,
     line_bytes: &[u8],
     bluetooth: &mut crate::BluetoothModule,
     flash: &mut crate::FlashDevice,
-    logger: &Mutex<RefCell<L>>,
 ) {
     let Ok(line) = core::str::from_utf8(line_bytes) else {
         send_line(bluetooth, b"ERR UTF8");
@@ -355,7 +347,7 @@ fn handle_command_line<L: ExternalLogger>(
                 erase_flash_range_4k(flash, FW_SLOT_START_ADDRESS, FW_SLOT_START_ADDRESS + size);
             if erase_result.is_err() {
                 send_line(bluetooth, b"ERR FW_ERASE");
-                log_bytes(logger, b"FW erase failed");
+                rprintln!("FW erase failed");
                 return;
             }
 
@@ -578,7 +570,7 @@ fn write_flash_linear(
     Ok(())
 }
 
-pub fn ensure_bluetooth_initialized<L: ExternalLogger>(
+pub fn ensure_bluetooth_initialized(
     clocks: &stm32l4xx_hal::rcc::Clocks,
     apb1r1: &mut stm32l4xx_hal::rcc::APB1R1,
     bluetooth_usart3: &mut Option<pac::USART3>,
@@ -589,7 +581,6 @@ pub fn ensure_bluetooth_initialized<L: ExternalLogger>(
     )>,
     bluetooth: &mut Option<crate::BluetoothModule>,
     bluetooth_initialized: &mut bool,
-    logger: &Mutex<RefCell<L>>,
 ) -> bool {
     if !crate::ENABLE_BLUETOOTH {
         return true;
@@ -603,7 +594,7 @@ pub fn ensure_bluetooth_initialized<L: ExternalLogger>(
         let (Some(usart3), Some((usart3_tx, usart3_rx, tx_ind))) =
             (bluetooth_usart3.take(), bluetooth_hw_resources.take())
         else {
-            log_bytes(logger, b"Bluetooth resources unavailable for lazy init");
+            rprintln!("Bluetooth resources unavailable for lazy init");
             return false;
         };
 
@@ -633,16 +624,10 @@ pub fn ensure_bluetooth_initialized<L: ExternalLogger>(
             true
         }
         Err(_) => {
-            log_bytes(logger, b"Bluetooth lazy init failed");
+            rprintln!("Bluetooth lazy init failed");
             false
         }
     }
 }
 
-fn log_bytes<L: ExternalLogger>(logger: &Mutex<RefCell<L>>, bytes: &[u8]) {
-    free(|cs| {
-        if let Err(_) = logger.borrow(cs).borrow_mut().log_bytes(bytes) {
-            rprintln!("Failed logging bytes to UART");
-        }
-    });
-}
+// UART logger removed; use rprintln! for debug output

@@ -1,6 +1,5 @@
-use core::{cell::RefCell, time::Duration};
+use core::time::Duration;
 
-use cortex_m::interrupt::{Mutex, free};
 use rtt_target::rprintln;
 use stdc_diving_algorithms::{
     deco_algorithm::{DecoSettings, calc_deco_schedule},
@@ -10,8 +9,8 @@ use stdc_diving_algorithms::{
 };
 
 use stdc_stm32_rs::benchmarking;
+use stdc_stm32_rs::components::display::LedDisplay;
 use stdc_stm32_rs::components::spi_utils::DetailsError;
-use stdc_stm32_rs::components::{display::LedDisplay, flash::Flash, uart_log::ExternalLogger};
 
 use crate::modes::{
     display_refresh, display_set_dive_time, display_set_stop_schedule, millis_tim5,
@@ -38,11 +37,7 @@ impl DiveTaskState {
     }
 }
 
-pub fn update_dive_time_if_due(
-    state: &mut DiveTaskState,
-    dive_start_millis: u32,
-    logger: &Mutex<RefCell<impl ExternalLogger>>,
-) -> bool {
+pub fn update_dive_time_if_due(state: &mut DiveTaskState, dive_start_millis: u32) -> bool {
     if millis_tim5_since(state.last_dive_time_update_millis) < DIVE_TIME_UPDATE_INTERVAL_MILLIS {
         return false;
     }
@@ -52,17 +47,15 @@ pub fn update_dive_time_if_due(
         Duration::from_millis((current_millis.wrapping_sub(dive_start_millis)) as u64);
     display_set_dive_time(duration_since_start);
     state.last_dive_time_update_millis = current_millis;
-    log_bytes(logger, b"Dive time updated");
+    rprintln!("Dive time updated");
     true
 }
 
-pub fn update_deco_schedule_if_due<const NUM_GASES: usize, F: Flash, L: ExternalLogger>(
+pub fn update_deco_schedule_if_due<const NUM_GASES: usize>(
     state: &mut DiveTaskState,
     loading: &TissuesLoading<{ NUM_TISSUES }, Pa>,
     gases: &[GasMix<f32>; NUM_GASES],
     deco_settings: &DecoSettings<Pa>,
-    flash: &mut F,
-    logger: &Mutex<RefCell<L>>,
 ) -> bool
 where
     [(); NUM_GASES * 3]: Sized,
@@ -86,45 +79,33 @@ where
     match result {
         Ok(stops) => {
             display_set_stop_schedule(stops);
-            log_bytes(logger, b"Dive deco schedule updated");
+            rprintln!("Dive deco schedule updated");
             true
         }
         Err(err) => {
             rprintln!("Got error while calculating deco schedule: {:?}.", err);
-            let _ = flash;
             false
         }
     }
 }
 
-pub fn refresh_display_if_due<D: LedDisplay, L: ExternalLogger>(
-    state: &mut DiveTaskState,
-    display: &mut D,
-    logger: &Mutex<RefCell<L>>,
-) -> bool {
+pub fn refresh_display_if_due<D: LedDisplay>(state: &mut DiveTaskState, display: &mut D) -> bool {
     if millis_tim5_since(state.last_display_refresh_millis) < DIVE_DISPLAY_REFRESH_INTERVAL_MILLIS {
         return false;
     }
 
     state.last_display_refresh_millis = millis_tim5();
 
-    let (result, sample) = benchmarking::measure("dive.display_refresh", || display_refresh(display));
+    let (result, sample) =
+        benchmarking::measure("dive.display_refresh", || display_refresh(display));
     benchmarking::log_sample(&sample);
 
     match result {
         Ok(_) => true,
         Err(e) => {
-            log_bytes(logger, b"Failed refreshing display.");
-            log_bytes(logger, e.details().as_bytes());
+            rprintln!("Failed refreshing display.");
+            rprintln!("Display error details: {:?}", e.details());
             false
         }
     }
-}
-
-fn log_bytes<L: ExternalLogger>(logger: &Mutex<RefCell<L>>, bytes: &[u8]) {
-    free(|cs| {
-        if let Err(_) = logger.borrow(cs).borrow_mut().log_bytes(bytes) {
-            rprintln!("Failed logging bytes to UART");
-        }
-    });
 }

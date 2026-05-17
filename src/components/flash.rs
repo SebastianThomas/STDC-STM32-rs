@@ -43,29 +43,25 @@ fn get_24bit_addr(addr: u32) -> [u8; 3] {
     ];
 }
 
-pub struct SpiFlash<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> {
+pub struct SpiFlash<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin> {
     current_pos: u32,
     max_addr: u32,
     spi: SPI,
     chip_select_pin: CSPin,
-
-    logger: L,
 }
 
-impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFlash<SPI, CSPin, L> {
+impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin> SpiFlash<SPI, CSPin> {
     pub fn new(
         current_pos: u32,
         max_addr: u32,
         spi: SPI,
         chip_select_pin: CSPin,
-        logger: L,
-    ) -> SpiFlash<SPI, CSPin, L> {
+    ) -> SpiFlash<SPI, CSPin> {
         SpiFlash {
             current_pos,
             max_addr,
             spi,
             chip_select_pin,
-            logger,
         }
     }
 
@@ -178,7 +174,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
         let low = self.chip_select_pin.set_low();
         if let Err(_) = low {
             let msg = "Failed setting CS to low";
-            let _ = (self.logger)(msg.as_bytes());
+            rprintln!("{}", msg);
             return Err(SpiError::new(1, msg));
         };
 
@@ -187,7 +183,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
                 Ok(_) => Ok([0; RBYTES]),
                 Err(_) => {
                     let msg = "Failed executing write operation";
-                    let _ = (self.logger)(msg.as_bytes());
+                    rprintln!("{}", msg);
                     Err(SpiError::new(0, msg))
                 }
             }
@@ -210,7 +206,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
                 }
                 Err(_) => {
                     let msg = "Failed executing rw operation";
-                    let _ = (self.logger)(msg.as_bytes());
+                    rprintln!("{}", msg);
                     Err(SpiError::new(0, msg))
                 }
             }
@@ -222,7 +218,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
             Ok(v) => Ok(v),
             Err(_) => {
                 let msg = "Failed setting CS to high";
-                let _ = (self.logger)(msg.as_bytes());
+                rprintln!("{}", msg);
                 return Err(SpiError::new(3, msg));
             }
         };
@@ -231,7 +227,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
     }
 }
 
-impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFlash<SPI, CSPin, L> {
+impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin> SpiFlash<SPI, CSPin> {
     /// Write an arbitrary-length buffer to the flash, splitting across page
     /// boundaries as necessary. This is not atomic: if an error occurs part
     /// way through, earlier pages may already be programmed.
@@ -247,7 +243,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
             // CS Low
             if let Err(_) = self.chip_select_pin.set_low() {
                 let msg = "Failed setting CS to low";
-                let _ = (self.logger)(msg.as_bytes());
+                rprintln!("{}", msg);
                 return Err(SpiError::new(1, msg));
             }
 
@@ -260,14 +256,14 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
             ];
             if let Err(_) = self.spi.write(&header) {
                 let msg = "Failed executing write operation (header)";
-                let _ = (self.logger)(msg.as_bytes());
+                rprintln!("{}", msg);
                 let _ = self.chip_select_pin.set_high();
                 return Err(SpiError::new(0, msg));
             }
 
             if let Err(_) = self.spi.write(&data[..write_len]) {
                 let msg = "Failed executing write operation (data)";
-                let _ = (self.logger)(msg.as_bytes());
+                rprintln!("{}", msg);
                 let _ = self.chip_select_pin.set_high();
                 return Err(SpiError::new(0, msg));
             }
@@ -275,7 +271,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
             // CS High
             if let Err(_) = self.chip_select_pin.set_high() {
                 let msg = "Failed setting CS to high";
-                let _ = (self.logger)(msg.as_bytes());
+                rprintln!("{}", msg);
                 return Err(SpiError::new(3, msg));
             }
 
@@ -312,7 +308,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
             // CS Low
             if let Err(_) = self.chip_select_pin.set_low() {
                 let msg = "Failed setting CS to low";
-                let _ = (self.logger)(msg.as_bytes());
+                rprintln!("{}", msg);
                 return Err(SpiError::new(1, msg));
             }
 
@@ -322,7 +318,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
                 }
                 Err(_) => {
                     let msg = "Failed executing rw operation";
-                    let _ = (self.logger)(msg.as_bytes());
+                    rprintln!("{}", msg);
                     let _ = self.chip_select_pin.set_high();
                     return Err(SpiError::new(0, msg));
                 }
@@ -331,7 +327,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
             // CS High
             if let Err(_) = self.chip_select_pin.set_high() {
                 let msg = "Failed setting CS to high";
-                let _ = (self.logger)(msg.as_bytes());
+                rprintln!("{}", msg);
                 return Err(SpiError::new(3, msg));
             }
 
@@ -343,9 +339,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> SpiFla
     }
 }
 
-impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> Flash
-    for SpiFlash<SPI, CSPin, L>
-{
+impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin> Flash for SpiFlash<SPI, CSPin> {
     type Error = SpiError;
 
     fn set_pos(&mut self, new_pos: u32) -> Result<u32, Self::Error> {
@@ -355,8 +349,8 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> Flash
                 details: "New address out of range for given Flash chip.",
             });
         }
-        self.max_addr = new_pos;
-        Ok(self.max_addr)
+        self.current_pos = new_pos;
+        Ok(self.current_pos)
     }
 
     fn write<const BYTES: usize>(&mut self, data: &[u8; BYTES]) -> Result<u32, Self::Error>
@@ -369,7 +363,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> Flash
         let start_addr = self.current_pos;
         if self.current_pos + bytes > self.max_addr {
             let msg = "Out of Bounds write attempted, aborting";
-            let _ = (self.logger)(msg.as_bytes());
+            rprintln!("{}", msg);
             return Err(SpiError::new(0, msg));
         }
         self.write_bytes(start_addr, data)?;
@@ -385,7 +379,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin, L: Fn(&[u8]) -> ()> Flash
         let bytes = BYTES as u32;
         if pos + bytes > self.max_addr {
             let msg = "Out of Bounds read attempted, aborting";
-            let _ = (self.logger)(msg.as_bytes());
+            rprintln!("{}", msg);
             return Err(SpiError::new(0, msg));
         }
         self.read_bytes(pos)

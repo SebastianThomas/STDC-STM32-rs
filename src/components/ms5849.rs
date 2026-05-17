@@ -71,9 +71,8 @@ impl SensorConfiguration {
 /// - Requires: EXTI interrupt handler + async state machine
 ///
 /// The interrupt signal allows you to:
-/// 1. Start both D1 and D2 conversions without waiting
-/// 2. Use an EXTI interrupt to receive notification when data is ready
-/// 3. Reduce CPU utilization and sleep time
+/// 1. Use an EXTI interrupt to receive notification when data is ready
+/// 2. Reduce CPU utilization and sleep time
 pub struct MS5849<INTERFACE, P> {
     interface: INTERFACE,
     config: SensorConfiguration,
@@ -202,14 +201,13 @@ where
     <I as Write>::Error: Debug,
     <I as WriteRead>::Error: Debug,
 {
-    pub async fn new_i2c<L: Fn(&[u8]) -> ()>(mut i2c: I, log_bytes: L) -> MS5849<I, ()> {
+    pub async fn new_i2c(mut i2c: I) -> MS5849<I, ()> {
         let mut prom: [u16; 16] = [0; 16];
 
         // Reset the MS5849, per datasheet
         write_i2c(&mut i2c, MS5849_I2C_ADDR, &[MS5849_RESET]);
 
         rprintln!("Reset MS5849 Pressure Sensor, waiting to get ready");
-        log_bytes(b"Reset MS5849 Pressure Sensor, waiting to get ready");
 
         Mono::delay(300u64.micros()).await;
 

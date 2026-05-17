@@ -6,9 +6,7 @@ use rtic_monotonics::{Monotonic, fugit::ExtU64};
 use core::fmt::Debug;
 
 use rtt_target::rprintln;
-use stm32l4xx_hal::{
-    hal::blocking::i2c::{Write, WriteRead},
-};
+use stm32l4xx_hal::hal::blocking::i2c::{Write, WriteRead};
 
 use crate::stm32::Mono;
 
@@ -181,11 +179,12 @@ where
         self.init_step_3_1(true)
     }
 
-    fn init_step_3_1(&mut self, skip_status_write: bool) -> Result<() ,BatteryStatusError> {
+    fn init_step_3_1(&mut self, skip_status_write: bool) -> Result<(), BatteryStatusError> {
         if !skip_status_write {
-        // Step 3
-        let status = self.read_register_u16(REG_STATUS)?;
-        self.write_register_u16(REG_STATUS, status & 0xFFFD)?;}
+            // Step 3
+            let status = self.read_register_u16(REG_STATUS)?;
+            self.write_register_u16(REG_STATUS, status & 0xFFFD)?;
+        }
         rprintln!("Battery Status IC ready, initializing step 3");
         let cap = self.read_register_u16(REG_REP_CAP)?;
         let soc = self.read_register_u16(REG_REP_SOC)?;

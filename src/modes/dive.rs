@@ -1,6 +1,5 @@
-use core::{cell::RefCell, fmt::Debug};
+use core::fmt::Debug;
 
-use cortex_m::interrupt::{Mutex, free};
 use rtt_target::rprintln;
 use stdc_diving_algorithms::{
     deco_algorithm::{DecoSettings, MVALUES, TISSUES},
@@ -30,7 +29,7 @@ use stdc_stm32_rs::{
         },
         flash::Flash,
         spi_utils::DetailsError,
-        uart_log::ExternalLogger,
+        // uart_log removed from dive mode; use rprintln! instead
     },
     constants::barometric::DepthOrAltitude,
 };
@@ -68,10 +67,15 @@ pub struct DiveRuntime<const NR_GASES: usize> {
     task_state: DiveTaskState,
 }
 
-pub fn setup_dive_mode<F: Flash, L: ExternalLogger, const NR_GASES: usize>(
+pub struct DiveFlashLog {
+    pub measurement_millis: u32,
+    pub pressure: Pa,
+    pub measurement: DiveMeasurement<Pa>,
+}
+
+pub fn setup_dive_mode<F: Flash, const NR_GASES: usize>(
     flash: &mut F,
     rtc: &Rtc,
-    logger: &Mutex<RefCell<L>>,
     surface_pressure: Pa,
     gases: &[GasMix<f32>; NR_GASES],
 ) -> DiveRuntime<NR_GASES>
@@ -128,8 +132,8 @@ where
     let dive_control_write = dive_control_data_block.write(flash);
     power_cut_mark_safe(POWER_CUT_UNSAFE_FLASH_WRITE);
     if let Err(e) = dive_control_write {
-        log_bytes(logger, b"Failed writing dive control data block.");
-        log_bytes(logger, e.details().as_bytes());
+        rprintln!("Failed writing dive control data block.");
+        rprintln!("Flash error details: {:?}", e.details());
     }
 
     DiveRuntime::<NR_GASES> {
@@ -158,18 +162,14 @@ where
 pub async fn run_dive_mode_tick<
     D: stdc_stm32_rs::components::display::LedDisplay,
     I: Write + Read + WriteRead,
-    F: Flash,
-    L: ExternalLogger,
     const NUM_GASES: usize,
 >(
     runtime: &mut DiveRuntime<NUM_GASES>,
     display: &mut D,
     ms5849_i2c: &mut MS5849<I, ()>,
-    flash: &mut F,
-    latest_measurements: &mut LatestMeasurements,
+    latest_measurements: LatestMeasurements,
     latest_calculations_state: &mut LatestCalculationsState<{ NUM_TISSUES }, Pa>,
-    logger: &Mutex<RefCell<L>>,
-) -> Option<Pa>
+) -> (Option<Pa>, LatestMeasurements, Option<DiveFlashLog>)
 where
     <I as Read>::Error: Debug,
     <I as Write>::Error: Debug,
@@ -182,40 +182,50 @@ where
     [(); 24 + NUM_GASES * 3 + 0]: Sized,
 {
     let current_millis = millis_tim5_since(runtime.dive_start_millis);
-    let _ = update_dive_time_if_due(&mut runtime.task_state, runtime.dive_start_millis, logger);
+    let _ = update_dive_time_if_due(&mut runtime.task_state, runtime.dive_start_millis);
 
     let measurement_millis = millis_tim5();
     ms5849_i2c.read_i2c().await;
     let temperature_c = ms5849_i2c.temperature();
+    let mut latest_measurements = latest_measurements;
+    let mut flash_log: Option<DiveFlashLog> = None;
 
     match ms5849_i2c.depth_relative_or_altitude(runtime.surface_pressure) {
         Ok(DepthOrAltitude::Depth { pressure, depth }) => {
             runtime.surfaced_since_millis = None;
-            latest_measurements.record_environment(
+            latest_measurements = latest_measurements.record_environment(
                 pressure,
                 Some(depth),
                 temperature_c,
                 measurement_millis,
             );
             handle_depth_measurement(
-                &mut runtime.flash_log_algorithm,
-                flash,
                 pressure,
                 depth,
-                latest_measurements,
                 latest_calculations_state,
                 &mut runtime.last_measurement_millis,
                 measurement_millis,
-                &mut runtime.last_logged_millis,
-                &mut runtime.last_logged_pressure,
                 &mut runtime.max_depth,
                 &mut runtime.loading,
                 &runtime.gases,
                 &runtime.current_gas_mode_idx,
             );
+            flash_log = flash_log_tick_plan(
+                &mut runtime.flash_log_algorithm,
+                &mut runtime.last_logged_millis,
+                &mut runtime.last_logged_pressure,
+                measurement_millis,
+                pressure,
+                DiveMeasurement {
+                    time_ms: measurement_millis as usize,
+                    depth: pressure,
+                    gas: runtime.current_gas_mode_idx.to_log_byte() as usize,
+                },
+                &latest_measurements,
+            );
         }
         Ok(DepthOrAltitude::Altitude { pressure, altitude }) => {
-            latest_measurements.record_environment(
+            latest_measurements = latest_measurements.record_environment(
                 pressure,
                 None,
                 temperature_c,
@@ -228,7 +238,7 @@ where
             );
             let start = runtime.surfaced_since_millis.get_or_insert(current_millis);
             if current_millis.wrapping_sub(*start) > DIVE_END_TOLERANCE_MILLIS {
-                return Some(pressure);
+                return (Some(pressure), latest_measurements, flash_log);
             }
         }
         Err((pressure, err)) => {
@@ -245,31 +255,50 @@ where
         &runtime.loading,
         &runtime.gases,
         &runtime.deco_settings,
-        flash,
-        logger,
     );
 
-    let _ = refresh_display_if_due(&mut runtime.task_state, display, logger);
+    let _ = refresh_display_if_due(&mut runtime.task_state, display);
 
-    None
+    (None, latest_measurements, flash_log)
 }
 
-fn handle_depth_measurement<
-    R: RateAlgorithm<Pa, Pa, u32>,
-    F: Flash,
-    const NR_GASES: usize,
-    const NUM_TISSUES: usize,
->(
-    flash_log_algorithm: &mut R,
+pub fn write_flash_log<F: Flash, const NUM_GASES: usize>(
+    runtime: &mut DiveRuntime<NUM_GASES>,
     flash: &mut F,
+    flash_log: DiveFlashLog,
+    latest_measurements: &LatestMeasurements,
+) {
+    let temperature = latest_measurements.temperature_for_log();
+    let battery = latest_measurements.battery_for_log();
+
+    let log_point_data = LogPointData::new(
+        LogPointMetadata::new(true, false, LevelState::Error, [false; 4]),
+        &flash_log.measurement,
+        0,
+        temperature,
+        battery,
+    );
+
+    power_cut_mark_unsafe(POWER_CUT_UNSAFE_FLASH_WRITE);
+    let write_res = log_point_data.write(flash);
+    power_cut_mark_safe(POWER_CUT_UNSAFE_FLASH_WRITE);
+    match write_res {
+        Ok(_) => {
+            runtime.last_logged_millis = flash_log.measurement_millis;
+            runtime.last_logged_pressure = flash_log.pressure;
+        }
+        Err(e) => {
+            rprintln!("Failed writing log point data to flash: {:?}", e);
+        }
+    }
+}
+
+fn handle_depth_measurement<const NR_GASES: usize, const NUM_TISSUES: usize>(
     pressure: Pa,
     depth: msw,
-    latest_measurements: &mut crate::LatestMeasurements,
     latest_calculations_state: &mut LatestCalculationsState<NUM_TISSUES, Pa>,
     last_measurement_millis: &mut u32,
     measurement_millis: u32,
-    last_logged_millis: &mut u32,
-    last_logged_pressure: &mut Pa,
     max_depth: &mut Pa,
     loading: &mut TissuesLoading<NUM_TISSUES, Pa>,
     gases: &[GasMix<f32>; NR_GASES],
@@ -278,12 +307,6 @@ fn handle_depth_measurement<
     let (_, sample) = benchmarking::measure("dive.rate_and_logging", || {
         rprintln!("Measuring Pressure: {:?}, depth: {:?}", pressure, depth);
         display_set_depth(depth);
-
-        let measurement = DiveMeasurement {
-            time_ms: measurement_millis as usize,
-            depth: pressure,
-            gas: current_gas_mode_idx.to_log_byte() as usize,
-        };
 
         let time_delta = measurement_millis - *last_measurement_millis;
         *last_measurement_millis = measurement_millis;
@@ -299,17 +322,6 @@ fn handle_depth_measurement<
             &current_gas,
         );
         latest_calculations_state.tissue_loadings = loading.clone();
-
-        flash_log_tick(
-            flash,
-            flash_log_algorithm,
-            last_logged_millis,
-            last_logged_pressure,
-            measurement_millis,
-            pressure,
-            &measurement,
-            latest_measurements,
-        );
     });
     benchmarking::log_sample(&sample);
 
@@ -319,7 +331,7 @@ fn handle_depth_measurement<
         let measurements_since_latest = latest_calculations_state.o2_tox.measurements_since_o2_calc;
         let nr_measurements = latest_calculations_state
             .o2_tox
-            .nr_measurementss_since_o2_calc;
+            .nr_measurements_since_o2_calc;
         latest_calculations_state.o2_tox.o2_tox_single = calculate_toxicity_diff(
             &measurements_since_latest[..nr_measurements],
             gases,
@@ -332,63 +344,40 @@ fn handle_depth_measurement<
             [measurements_since_latest[nr_measurements - 1]; MEASUREMENT_BUFFER_SIZE];
         latest_calculations_state
             .o2_tox
-            .nr_measurementss_since_o2_calc = 1;
+            .nr_measurements_since_o2_calc = 1;
     });
     benchmarking::log_sample(&sample);
 }
 
-fn flash_log_tick<R: RateAlgorithm<Pa, Pa, u32>, F: Flash>(
-    flash: &mut F,
+fn flash_log_tick_plan<R: RateAlgorithm<Pa, Pa, u32>>(
     flash_log_algorithm: &mut R,
     last_logged_millis: &mut u32,
     last_logged_pressure: &mut Pa,
     measurement_millis: u32,
     pressure: Pa,
-    measurement: &DiveMeasurement<Pa>,
+    measurement: DiveMeasurement<Pa>,
     latest_measurements: &LatestMeasurements,
-) {
-    let temperature = latest_measurements.temperature_for_log();
-    let battery = latest_measurements.battery_for_log();
-
+) -> Option<DiveFlashLog> {
     let next_log_time_delta = flash_log_algorithm.next_iter(*last_logged_pressure, pressure);
     let next_iter_due_in = next_log_time_delta.map(|n| *last_logged_millis + n);
     match next_iter_due_in {
         Ok(next_iter) => {
             if measurement_millis > next_iter {
-                let deco_obligation = false;
-                let level_state = LevelState::Error;
-                let ascent_rate = 0;
-                let log_point_data = LogPointData::new(
-                    LogPointMetadata::new(true, deco_obligation, level_state, [false; 4]),
-                    &measurement,
-                    ascent_rate,
-                    temperature,
-                    battery,
-                );
-                power_cut_mark_unsafe(POWER_CUT_UNSAFE_FLASH_WRITE);
-                let write_res = log_point_data.write(flash);
-                power_cut_mark_safe(POWER_CUT_UNSAFE_FLASH_WRITE);
-                match write_res {
-                    Ok(_) => {
-                        *last_logged_millis = measurement_millis;
-                        *last_logged_pressure = pressure;
-                    }
-                    Err(e) => {
-                        rprintln!("Failed writing log point data to flash: {:?}", e);
-                    }
-                }
+                let _ = latest_measurements;
+                Some(DiveFlashLog {
+                    measurement_millis,
+                    pressure,
+                    measurement,
+                })
+            } else {
+                None
             }
         }
         Err(e) => {
             rprintln!("Failed getting next log time: {:?}", e);
+            None
         }
     }
 }
 
-fn log_bytes<L: ExternalLogger>(logger: &Mutex<RefCell<L>>, bytes: &[u8]) {
-    free(|cs| {
-        if let Err(_) = logger.borrow(cs).borrow_mut().log_bytes(bytes) {
-            rprintln!("Failed logging bytes to UART");
-        }
-    });
-}
+// UART logger removed; use rprintln! instead

@@ -7,28 +7,28 @@
 
 use core::{
     cell::RefCell,
+    sync::atomic::{AtomicBool, Ordering},
     task::{Context, Poll},
 };
 
 use cortex_m::interrupt::{Mutex as CmMutex, free};
-#[cfg(feature = "online_benchmarking")]
-use cortex_m::register::primask;
 
 use cortex_m_rt::exception;
 use modes::{AppMode, SurfaceModeExit};
-use rtic_monotonics::stm32::prelude::*;
+use rtic_monotonics::{fugit::Duration, stm32::prelude::*};
 use rtt_target::{rprintln, rtt_init_print};
 
 #[cfg(not(feature = "online_benchmarking"))]
 use stm32l4xx_hal::hal::timer::{Cancel, CountDown};
 use stm32l4xx_hal::{
+    gpio::{Edge, ExtiPin},
     hal::spi::MODE_0,
     i2c::{self, I2c},
     pac::{self, TIM5},
     prelude::*,
     pwr::Pwr,
     rcc::{APB1R1, Clocks, PllConfig, PllDivider},
-    rtc::{Rtc, RtcClockSource, RtcConfig},
+    rtc::{Rtc, RtcClockSource, RtcConfig, RtcWakeupClockSource},
     serial::Serial,
     spi::Spi,
     timer::Timer,
@@ -41,10 +41,9 @@ use stdc_stm32_rs::{
         battery_status::{BatteryStatusI2C, Max17262Variant},
         display::*,
         flash::{Flash, SpiFlash},
-        uart_log::{ExternalLogger, UartLogger},
     },
     concat_any_bytes,
-    stm32::{Mono, noop_waker},
+    stm32::{Mono, TIM2_MONO_CLOCK, noop_waker},
 };
 
 mod modes;
@@ -53,7 +52,8 @@ mod types;
 
 use stdc_diving_algorithms::{
     gas::{self, GasMix},
-    pressure_unit::Pressure,
+    pressure_unit::{Pa, Pressure},
+    setup::NUM_TISSUES,
 };
 pub use types::*;
 
@@ -72,79 +72,47 @@ const STOP2_SURFACE_SLEEP_SECONDS: u32 = 2;
 
 const GASES: [GasMix<f32>; 1] = [gas::AIR];
 
-fn flash_log_bytes(bytes: &[u8]) {
-    rprintln!("{}", str::from_utf8(bytes).unwrap());
-}
-fn sensor_log_bytes(_bytes: &[u8]) {}
-
-#[cfg(not(feature = "online_benchmarking"))]
-fn log_tim5_state(_: &str) {}
-
-#[cfg(feature = "online_benchmarking")]
-fn log_tim5_state(tag: &str) {
-    let tim5 = unsafe { &*pac::TIM5::ptr() };
-    let rcc = unsafe { &*pac::RCC::ptr() };
-    let primask_active = primask::read().is_active();
-    let tim5_enabled = cortex_m::peripheral::NVIC::is_enabled(pac::Interrupt::TIM5);
-    let tim5_pending = cortex_m::peripheral::NVIC::is_pending(pac::Interrupt::TIM5);
-    let exti0_enabled = cortex_m::peripheral::NVIC::is_enabled(pac::Interrupt::EXTI0);
-    let exti0_pending = cortex_m::peripheral::NVIC::is_pending(pac::Interrupt::EXTI0);
-
-    rprintln!(
-        "{} TIM5: PRIMASK={} NVIC[TIM5 en={} pend={}] NVIC[EXTI0 en={} pend={}] RCC_APB1ENR1=0x{:08X} CR1=0x{:08X} DIER=0x{:08X} SR=0x{:08X} CNT=0x{:08X} CCR1=0x{:08X} CCR2=0x{:08X} PSC=0x{:08X} ARR=0x{:08X}",
-        tag,
-        primask_active,
-        tim5_enabled,
-        tim5_pending,
-        exti0_enabled,
-        exti0_pending,
-        rcc.apb1enr1.read().bits(),
-        tim5.cr1.read().bits(),
-        tim5.dier.read().bits(),
-        tim5.sr.read().bits(),
-        tim5.cnt.read().bits(),
-        tim5.ccr1.read().bits(),
-        tim5.ccr2.read().bits(),
-        tim5.psc.read().bits(),
-        tim5.arr.read().bits(),
-    );
-}
-
 static POWER_CUT_RED_INDICATOR: CmMutex<RefCell<Option<Pc9Output>>> =
     CmMutex::new(RefCell::new(None));
+#[cfg(feature = "bluetooth")]
+static BLUETOOTH_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static RTC_WAKEUP_INTERRUPT_TRIGGERED: AtomicBool = AtomicBool::new(false);
 
 #[rtic::app(device = stm32l4xx_hal::pac, peripherals = true, dispatchers = [EXTI0])]
 mod app {
-    use rtic_monotonics::fugit::Duration;
-    use stdc_diving_algorithms::{pressure_unit::Pa, setup::NUM_TISSUES};
-    use stdc_stm32_rs::stm32::TIM2_MONO_CLOCK;
+    use stm32l4xx_hal::{pac::EXTI, rtc::Event};
 
     use super::*;
 
     #[shared]
     struct Shared {
         latest_measurements: LatestMeasurements,
+        clocks: stm32l4xx_hal::rcc::Clocks,
+        apb1r1: stm32l4xx_hal::rcc::APB1R1,
+        flash: FlashDevice,
     }
 
     #[local]
     struct Local {
         mode: AppMode,
         dive_mode_indicator: Pc8Output,
+        #[cfg(feature = "bluetooth")]
+        bluetooth_button: Pa1InputPullUp,
         mode_surface_pressure: Pa,
         surface_mode_state: modes::surface::SurfaceModeState,
-        #[cfg(feature = "bluetooth")]
-        bluetooth_mode_state: modes::bluetooth::BluetoothModeState,
         rtc: Rtc,
         display: DisplayDevice,
-        flash: FlashDevice,
         ms5849_i2c: SensorMs5849,
         battery_status: BatteryGauge,
-        logger: &'static LoggerMutex,
-        clocks: stm32l4xx_hal::rcc::Clocks,
-        apb1r1: stm32l4xx_hal::rcc::APB1R1,
+        #[cfg(feature = "bluetooth")]
+        bluetooth_mode_state: modes::bluetooth::BluetoothModeState,
+        #[cfg(feature = "bluetooth")]
         bluetooth_usart3: Option<pac::USART3>,
+        #[cfg(feature = "bluetooth")]
         bluetooth_hw_resources: Option<(Pb10Usart3Tx, Pb11Usart3Rx, Pb2InputPullDown)>,
+        #[cfg(feature = "bluetooth")]
         bluetooth: Option<BluetoothModule>,
+        #[cfg(feature = "bluetooth")]
         bluetooth_initialized: bool,
         dive_runtime: Option<modes::dive::DiveRuntime<{ GASES.len() }>>,
         latest_calculations_state: LatestCalculationsState<{ NUM_TISSUES }, Pa>,
@@ -156,7 +124,7 @@ mod app {
         rprintln!("Booting..");
 
         let mut core = cx.core;
-        let dp = cx.device;
+        let mut dp = cx.device;
 
         benchmarking::enable_cycle_counter(&mut core);
 
@@ -184,9 +152,11 @@ mod app {
 
         rprintln!("Clocks, TIM5, Delay set up");
 
-        // TODO: LSE crystal on first soldered PCB not responding (gets stuck after "RTC Config")
+        // TODO: LSE crystal on first soldered PCB not responding
         //  so using LSI for now
-        let rtc_config = RtcConfig::default().clock_config(RtcClockSource::LSI);
+        let rtc_config = RtcConfig::default()
+            .clock_config(RtcClockSource::LSI)
+            .wakeup_clock_config(RtcWakeupClockSource::CkSpre);
         rprintln!("RTC Config");
         let mut rtc: Rtc = Rtc::rtc(dp.RTC, &mut apb1r1, &mut rcc.bdcr, &mut pwr.cr1, rtc_config);
         rprintln!("RTC Config II");
@@ -205,6 +175,40 @@ mod app {
                 daylight_savings: false,
             },
         );
+
+        // let exti = unsafe { &*pac::EXTI::ptr() };
+        // rtc.listen(pac::EXTI, stm32l4xx_hal::rtc::Event::WakeupTimer);
+        let exti = unsafe { &mut *(pac::EXTI::ptr() as *mut EXTI) };
+        rtc.listen(exti, Event::WakeupTimer);
+        let is_interrupt = rtc.check_interrupt(Event::WakeupTimer, true);
+        rprintln!("Was interrupt before: {}", is_interrupt);
+
+        RTC_WAKEUP_INTERRUPT_TRIGGERED.store(false, Ordering::Release);
+        let mut wakeup_timer = rtc.wakeup_timer();
+        wakeup_timer.start(1u32);
+        unsafe {
+            cortex_m::peripheral::NVIC::unmask(pac::Interrupt::RTC_WKUP);
+        }
+
+        let mut wakeup_interrupt_seen = false;
+        for _ in 0..4 {
+            cortex_m::asm::wfi();
+            if RTC_WAKEUP_INTERRUPT_TRIGGERED.load(Ordering::Acquire) {
+                wakeup_interrupt_seen = true;
+                break;
+            }
+        }
+
+        rprintln!("RTC wakeup interrupt observed: {}", wakeup_interrupt_seen);
+    let _ = wakeup_timer.cancel();
+
+        // let rtc_ptr = unsafe { &*stm32l4xx_hal::pac::RTC::ptr() };
+        // rtc_ptr.cr.modify(|_, w| w.wutie().set_bit());
+
+        unsafe {
+            cortex_m::peripheral::NVIC::unmask(pac::Interrupt::RTC_WKUP);
+            cortex_m::peripheral::NVIC::unmask(pac::Interrupt::RTC_ALARM);
+        }
 
         rprintln!("RTC set up");
 
@@ -257,10 +261,18 @@ mod app {
             &mut apb2,
         );
         let (debug_tx, debug_rx) = debug_uart.split();
-        let logger_obj = UartLogger::new(debug_tx, debug_rx);
-        let logger: &'static LoggerMutex =
-            cortex_m::singleton!(: LoggerMutex = CmMutex::new(RefCell::new(logger_obj))).unwrap();
-        log_str(logger, "Logger to UART set up");
+        rprintln!("Logger to UART still available; will use rprintln and UART once.");
+        // Use the UART logger once to avoid dead-code for `UartLogger` / `ExternalLogger`.
+        {
+            use stdc_stm32_rs::components::uart_log::{ExternalLogger, UartLogger};
+            let mut uart_logger = UartLogger::new(debug_tx, debug_rx);
+            if let Err(_) = <UartLogger<_, _> as ExternalLogger>::log_bytes(
+                &mut uart_logger,
+                b"Initialized UART\r\n",
+            ) {
+                rprintln!("UART logger write failed");
+            }
+        }
 
         // TODO: Check reset is actually push pull output for Display
         let spi_reset = gpioc
@@ -273,7 +285,7 @@ mod app {
             .pb0
             .into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper);
 
-        log_str(logger, "Additional Pins for Display set up");
+        rprintln!("Additional Pins for Display set up");
 
         let mut cs = gpioa
             .pa4
@@ -304,7 +316,7 @@ mod app {
             &mut apb2,
         );
         let display = create_display(display_en, display_spi, spi_reset, not_data_command);
-        log_str(logger, "Display finished setting up");
+        rprintln!("Display finished setting up");
 
         let mut flash_cs_nss = gpiob
             .pb12
@@ -333,18 +345,18 @@ mod app {
             clocks,
             &mut apb1r1,
         );
-        let mut flash: FlashDevice =
-            SpiFlash::new(0, 1 << 22, flash_spi, flash_cs_nss, flash_log_bytes);
+        let mut flash: FlashDevice = SpiFlash::new(0, 1 << 22, flash_spi, flash_cs_nss);
 
-        log_str(logger, "Flash Device set up");
+        rprintln!("Flash Device set up");
 
         let cur_addr = flash
             .read::<4>(INITIAL_FLASH_ADDRESS)
             .map(u32::from_be_bytes);
-        log_str(logger, "Flash initial address read complete");
+        rprintln!("Flash initial address read complete: {:?}", cur_addr);
         match cur_addr {
-            Err(_) | Ok(0) => {
+            Err(_) | Ok(0) | Ok(u32::MAX) => {
                 let new_pos = INITIAL_FLASH_ADDRESS + 4;
+                rprintln!("Initial flash address invalid, resetting to {:?}", new_pos);
                 modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
                 let _ = flash.write(&new_pos.to_be_bytes());
                 let _ = flash.set_pos(new_pos);
@@ -363,7 +375,7 @@ mod app {
         modes::power_cut_mark_safe(modes::POWER_CUT_UNSAFE_FLASH_WRITE);
         sync_power_cut_indicator();
 
-        log_str(logger, "Flash write complete");
+        rprintln!("Flash write complete");
 
         let mut pressure_sensor_enable_pin = gpiob
             .pb8
@@ -385,14 +397,14 @@ mod app {
             i2c::Config::new(100.kHz(), clocks),
             &mut apb1r1,
         );
-        let ms5849_i2c: SensorMs5849 = create_sensor_ms5849(sensor_i2c, sensor_log_bytes);
+        let ms5849_i2c: SensorMs5849 = create_sensor_ms5849(sensor_i2c);
 
-        log_str(logger, "Pressure Sensor set up");
+        rprintln!("Pressure Sensor set up");
 
         let start_surface_pressure = match ms5849_i2c.current_pressure_pa() {
             Some(p) => {
                 let temp = ms5849_i2c.temperature();
-                log_str(logger, "Got first result from Pressure Sensor");
+                rprintln!("Got first result from Pressure Sensor");
                 rprintln!(
                     "Start Pressure: {} Pa, Temperature: {}",
                     p.to_f32(),
@@ -428,8 +440,21 @@ mod app {
         );
         let battery_status: BatteryGauge = create_battery_status(battery_gauge_i2c);
 
-        log_str(logger, "Battery Status set up");
+        rprintln!("Battery Status set up");
 
+        #[cfg(feature = "bluetooth")]
+        let mut bluetooth_button = gpioa
+            .pa1
+            .into_pull_up_input(&mut gpioa.moder, &mut gpioa.pupdr);
+        #[cfg(feature = "bluetooth")]
+        {
+            bluetooth_button.make_interrupt_source(&mut dp.SYSCFG, &mut apb2);
+            bluetooth_button.enable_interrupt(&mut dp.EXTI);
+            bluetooth_button.trigger_on_edge(&mut dp.EXTI, Edge::Falling);
+            unsafe {
+                cortex_m::peripheral::NVIC::unmask(pac::Interrupt::EXTI1);
+            }
+        }
         let bluetooth_tx_ind = gpiob
             .pb2
             .into_pull_down_input(&mut gpiob.moder, &mut gpiob.pupdr);
@@ -450,35 +475,30 @@ mod app {
         let _ = task_mode_tick::spawn();
         let _ = task_battery_update::spawn();
 
-        #[cfg(feature = "bluetooth")]
-        let bluetooth_mode_state: modes::bluetooth::BluetoothModeState =
-            modes::bluetooth::BluetoothModeState::new();
-
-        log_str(logger, "Finished init task, returning");
+        rprintln!("Finished init task, returning");
 
         (
             Shared {
                 latest_measurements: LatestMeasurements::new(),
+                clocks,
+                apb1r1,
+                flash,
             },
             Local {
                 mode: AppMode::Surface,
                 dive_mode_indicator,
                 mode_surface_pressure: start_surface_pressure,
                 surface_mode_state: modes::surface::SurfaceModeState::new(),
-                #[cfg(feature = "bluetooth")]
-                bluetooth_mode_state,
-                rtc,
-                display,
-                flash,
-                ms5849_i2c,
-                battery_status,
-                logger,
-                clocks,
-                apb1r1,
+                bluetooth_button,
+                bluetooth_mode_state: modes::bluetooth::BluetoothModeState::new(),
                 bluetooth_usart3: Some(dp.USART3),
                 bluetooth_hw_resources: Some((usart3_tx, usart3_rx, bluetooth_tx_ind)),
                 bluetooth: None,
                 bluetooth_initialized: false,
+                rtc,
+                display,
+                ms5849_i2c,
+                battery_status,
                 dive_runtime: None,
                 latest_calculations_state: LatestCalculationsState::new(
                     start_surface_pressure,
@@ -503,9 +523,95 @@ mod app {
             i += 1;
             if i % 100_000 == 0 {
                 rprintln!("Idle for {}00K cycles", i / 100_000);
-                log_tim5_state("Idle heartbeat");
             }
         }
+    }
+
+    #[cfg(feature = "bluetooth")]
+    fn request_bluetooth_mode() {
+        if BLUETOOTH_MODE_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            if task_bluetooth_mode::spawn().is_err() {
+                BLUETOOTH_MODE_ACTIVE.store(false, Ordering::Release);
+            }
+        }
+    }
+
+    #[cfg(feature = "bluetooth")]
+    #[task(binds = EXTI1, priority = 2, local = [bluetooth_button])]
+    fn task_bluetooth_button(cx: task_bluetooth_button::Context) {
+        if cx.local.bluetooth_button.check_interrupt() {
+            cx.local.bluetooth_button.clear_interrupt_pending_bit();
+            request_bluetooth_mode();
+        }
+    }
+
+    #[cfg(feature = "bluetooth")]
+    #[task(priority = 1, shared = [clocks, apb1r1, flash], local = [
+        bluetooth_mode_state,
+        bluetooth_usart3,
+        bluetooth_hw_resources,
+        bluetooth,
+        bluetooth_initialized,
+    ])]
+    async fn task_bluetooth_mode(mut cx: task_bluetooth_mode::Context) {
+        // Bluetooth mode task - spawned by PA1 button interrupt
+        // Currently a placeholder for the complete Bluetooth task implementation
+        cx.local.bluetooth_mode_state.on_enter();
+
+        loop {
+            if !BLUETOOTH_MODE_ACTIVE.load(Ordering::Acquire) {
+                break;
+            }
+
+            // Try to ensure Bluetooth hardware is initialized using shared clocks/apb1r1
+            let bluetooth_ready = cx.shared.clocks.lock(|clocks| {
+                cx.shared.apb1r1.lock(|apb1r1| {
+                    modes::bluetooth::ensure_bluetooth_initialized(
+                        clocks,
+                        apb1r1,
+                        &mut cx.local.bluetooth_usart3,
+                        &mut cx.local.bluetooth_hw_resources,
+                        &mut cx.local.bluetooth,
+                        &mut cx.local.bluetooth_initialized,
+                    )
+                })
+            });
+
+            if !bluetooth_ready {
+                // wait and retry initialization
+                Mono::delay(BLUETOOTH_TASK_DELAY_MILLIS.millis()).await;
+                continue;
+            }
+
+            // Bluetooth initialized; full Bluetooth mode behavior (flash access, etc.)
+            // will be implemented later with proper coordination.
+            Mono::delay(BLUETOOTH_TASK_DELAY_MILLIS.millis()).await;
+            if let Some(bluetooth) = cx.local.bluetooth.as_mut() {
+                cx.shared.flash.lock(|flash| {
+                    let _ = modes::bluetooth::run_bluetooth_mode_tick(
+                        &mut cx.local.bluetooth_mode_state,
+                        bluetooth,
+                        flash,
+                    );
+                });
+            }
+        }
+
+        BLUETOOTH_MODE_ACTIVE.store(false, Ordering::Release);
+    }
+
+    #[task(binds = RTC_WKUP, priority = 2)]
+    fn task_rtc_wakeup(_: task_rtc_wakeup::Context) {
+        let rtc = unsafe { &*pac::RTC::ptr() };
+        rtc.isr.modify(|_, w| w.wutf().clear_bit());
+        unsafe {
+            (*pac::EXTI::ptr()).pr1.write(|w| w.bits(1 << 20));
+        }
+        RTC_WAKEUP_INTERRUPT_TRIGGERED.store(true, Ordering::Release);
+        rprintln!("RTC wakeup interrupt fired");
     }
 
     enum TaskModeTickResult {
@@ -514,24 +620,14 @@ mod app {
         Delay(Duration<u64, 1, { TIM2_MONO_CLOCK }>),
     }
 
-    #[task(priority = 1, shared = [latest_measurements], local = [
+    #[task(priority = 1, shared = [latest_measurements, clocks, apb1r1, flash], local = [
         mode,
         dive_mode_indicator,
         mode_surface_pressure,
         surface_mode_state,
-        #[cfg(feature = "bluetooth")]
-        bluetooth_mode_state,
         ms5849_i2c,
         display,
-        flash,
-        logger,
         rtc,
-        clocks,
-        apb1r1,
-        bluetooth_usart3,
-        bluetooth_hw_resources,
-        bluetooth,
-        bluetooth_initialized,
         dive_runtime,
         latest_calculations_state,
     ])]
@@ -544,82 +640,55 @@ mod app {
 
             let result: TaskModeTickResult = match *cx.local.mode {
                 AppMode::Surface => {
-                    log_tim5_state("Before surface tick");
-                    let (surface_exit, sample) =
+                    let ((surface_exit, latest_measurements, surface_flash_log), sample) =
                         benchmarking::measure_async("task.surface.tick", async {
-                            log_tim5_state("Surface tick closure start");
-                            let mut latest_measurements =
-                                cx.shared.latest_measurements.lock(|m| *m);
-                            let surface_exit = modes::surface::run_surface_mode_tick(
-                                cx.local.surface_mode_state,
-                                cx.local.ms5849_i2c,
-                                cx.local.flash,
-                                &mut latest_measurements,
-                            )
-                            .await;
-                            log_tim5_state("Surface tick closure resumed");
-                            cx.shared
-                                .latest_measurements
-                                .lock(|m| *m = latest_measurements);
-                            surface_exit
+                            let latest_measurements = cx.shared.latest_measurements.lock(|m| *m);
+                            let (surface_exit, latest_measurements, surface_flash_log) =
+                                modes::surface::run_surface_mode_tick(
+                                    cx.local.surface_mode_state,
+                                    cx.local.ms5849_i2c,
+                                    latest_measurements,
+                                )
+                                .await;
+                            (surface_exit, latest_measurements, surface_flash_log)
                         })
                         .await;
-                    log_tim5_state("After surface tick");
-                    rprintln!("Log benchmark sample {:?}", sample);
                     benchmarking::log_sample(&sample);
                     rprintln!("Finished Surface Tick with exit mode {:?}", surface_exit);
+
+                    cx.shared
+                        .latest_measurements
+                        .lock(|m| *m = latest_measurements);
+                    if let Some((current_measurement_millis, pressure)) = surface_flash_log {
+                        cx.shared.flash.lock(|flash| {
+                            modes::surface::log_data_flash(
+                                current_measurement_millis,
+                                pressure,
+                                &latest_measurements,
+                                flash,
+                                cx.local.surface_mode_state,
+                            );
+                        });
+                    }
 
                     match surface_exit {
                         Some(SurfaceModeExit::Dive(surface_pressure)) => {
                             *cx.local.mode_surface_pressure = surface_pressure;
                             *cx.local.mode = AppMode::Dive;
-                            *cx.local.dive_runtime = Some(modes::dive::setup_dive_mode(
-                                cx.local.flash,
-                                cx.local.rtc,
-                                cx.local.logger,
-                                surface_pressure,
-                                &GASES,
-                            ));
-                            TaskModeTickResult::DirectContinue
-                        }
-                        #[cfg(feature = "bluetooth")]
-                        Some(SurfaceModeExit::Bluetooth(surface_pressure)) => {
-                            *cx.local.mode_surface_pressure = surface_pressure;
-                            *cx.local.mode = AppMode::Bluetooth;
-                            cx.local.bluetooth_mode_state.on_enter();
+                            *cx.local.dive_runtime = Some(cx.shared.flash.lock(|flash| {
+                                modes::dive::setup_dive_mode(
+                                    flash,
+                                    cx.local.rtc,
+                                    surface_pressure,
+                                    &GASES,
+                                )
+                            }));
                             TaskModeTickResult::DirectContinue
                         }
                         None => {
                             sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
                             TaskModeTickResult::EnterStop2
                         }
-                    }
-                }
-                #[cfg(feature = "bluetooth")]
-                AppMode::Bluetooth => {
-                    let bluetooth_ready = modes::bluetooth::ensure_bluetooth_initialized(
-                        cx.local.clocks,
-                        cx.local.apb1r1,
-                        cx.local.bluetooth_usart3,
-                        cx.local.bluetooth_hw_resources,
-                        cx.local.bluetooth,
-                        cx.local.bluetooth_initialized,
-                        cx.local.logger,
-                    );
-
-                    if !bluetooth_ready
-                        || modes::bluetooth::run_bluetooth_mode_tick(
-                            cx.local.bluetooth_mode_state,
-                            cx.local.bluetooth.as_mut().unwrap(),
-                            cx.local.flash,
-                            cx.local.logger,
-                        )
-                    {
-                        transition_into_surface(cx.local.mode, cx.local.surface_mode_state);
-                        TaskModeTickResult::DirectContinue
-                    } else {
-                        // TODO: Bluetooth Functionality
-                        TaskModeTickResult::Delay(BLUETOOTH_TASK_DELAY_MILLIS.millis())
                     }
                 }
                 AppMode::Dive => {
@@ -630,28 +699,33 @@ mod app {
                         return;
                     };
 
-                    let dive_exit = {
-                        let mut latest_measurements = cx.shared.latest_measurements.lock(|m| *m);
-                        let (dive_exit, sample) =
-                            benchmarking::measure_async("task.dive.tick", async {
-                                modes::dive::run_dive_mode_tick(
-                                    runtime,
-                                    cx.local.display,
-                                    cx.local.ms5849_i2c,
-                                    cx.local.flash,
-                                    &mut latest_measurements,
-                                    &mut cx.local.latest_calculations_state,
-                                    cx.local.logger,
-                                )
-                                .await
-                            })
+                    let (dive_exit, latest_measurements, flash_log) = {
+                        let latest_measurements = cx.shared.latest_measurements.lock(|m| *m);
+                        let (dive_exit, latest_measurements, flash_log) =
+                            modes::dive::run_dive_mode_tick(
+                                runtime,
+                                cx.local.display,
+                                cx.local.ms5849_i2c,
+                                latest_measurements,
+                                &mut cx.local.latest_calculations_state,
+                            )
                             .await;
-                        cx.shared
-                            .latest_measurements
-                            .lock(|m| *m = latest_measurements);
-                        benchmarking::log_sample(&sample);
-                        dive_exit
+                        (dive_exit, latest_measurements, flash_log)
                     };
+
+                    cx.shared
+                        .latest_measurements
+                        .lock(|m| *m = latest_measurements);
+                    if let Some(flash_log) = flash_log {
+                        cx.shared.flash.lock(|flash| {
+                            modes::dive::write_flash_log(
+                                runtime,
+                                flash,
+                                flash_log,
+                                &latest_measurements,
+                            );
+                        });
+                    }
 
                     if let Some(surface_pressure) = dive_exit {
                         *cx.local.mode_surface_pressure = surface_pressure;
@@ -676,15 +750,14 @@ mod app {
                     rprintln!("Going to sleep");
                     #[cfg(not(feature = "online_benchmarking"))]
                     {
-                        enter_stop2_for_surface(cx.local.rtc);
-                        let _ = wake_reinit::spawn();
-                        // Allow scheduling of other tasks to avoid starving with this loop
-                        Mono::delay(1u64.micros()).await;
+                        enter_stop2_for_surface(cx.local.rtc).await;
+                        reinit_after_stop2();
                     }
                     #[cfg(feature = "online_benchmarking")]
                     Mono::delay(1000u64.millis()).await;
                 }
             }
+            Mono::delay(1u64.millis()).await;
         }
     }
 
@@ -700,36 +773,6 @@ mod app {
 
             tasks::battery::wait_for_next_battery_update().await;
         }
-    }
-
-    #[task(priority = 1)]
-    async fn wake_reinit(_: wake_reinit::Context) {
-        rprintln!("Waking up, reinit clocks");
-        let dp = unsafe { pac::Peripherals::steal() };
-
-        dp.RCC.ahb1enr.modify(|_, w| w.dma1en().set_bit());
-        dp.DBGMCU.cr.modify(|_, w| {
-            w.trace_ioen().set_bit();
-            w.dbg_sleep().set_bit();
-            w.dbg_stop().set_bit();
-            w.dbg_standby().set_bit()
-        });
-
-        let mut rcc = dp.RCC.constrain();
-        let mut flash_pac = dp.FLASH.constrain();
-        let mut pwr = dp.PWR.constrain(&mut rcc.apb1r1);
-
-        let _clocks = init_clocks(
-            rcc.cfgr,
-            &mut flash_pac.acr,
-            &mut pwr,
-            dp.TIM5,
-            &mut rcc.apb1r1,
-        );
-        rprintln!("Checking Delay");
-        Mono::delay(2_u64.micros()).await;
-        rprintln!("Spawning main task");
-        let _ = task_mode_tick::spawn();
     }
 }
 
@@ -765,8 +808,9 @@ fn init_clocks(
 
     clocks
 }
-fn create_sensor_ms5849<L: Fn(&[u8]) -> ()>(i2c: SensorI2c, log_bytes: L) -> SensorMs5849 where {
-    let mut fut = MS5849::new_i2c(i2c, log_bytes);
+
+fn create_sensor_ms5849(i2c: SensorI2c) -> SensorMs5849 {
+    let mut fut = MS5849::new_i2c(i2c);
     let mut fut = unsafe { core::pin::Pin::new_unchecked(&mut fut) };
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
@@ -839,41 +883,60 @@ fn transition_into_surface(
     surface_mode_state.reset_for_entry();
 }
 
-fn log_str<L: ExternalLogger>(logger: &CmMutex<RefCell<L>>, str: &str) {
-    rprintln!("{}", str);
-    free(|cs| {
-        let logged = logger.borrow(cs).borrow_mut().log_bytes(str.as_bytes());
-        if logged.is_err() {
-            rprintln!("Failed logging bytes to UART");
-        }
-    });
-}
-
 #[cfg(not(feature = "online_benchmarking"))]
-fn enter_stop2_for_surface(rtc: &mut Rtc) {
+async fn enter_stop2_for_surface(rtc: &mut Rtc) {
     let mut wakeup_timer = rtc.wakeup_timer();
     wakeup_timer.start(STOP2_SURFACE_SLEEP_SECONDS);
 
-    unsafe {
-        (*pac::PWR::ptr()).scr.write(|w| {
-            w.wuf1().set_bit();
-            w.wuf2().set_bit();
-            w.wuf3().set_bit();
-            w.wuf4().set_bit();
-            w.wuf5().set_bit();
-            w
-        });
-
-        (*pac::PWR::ptr()).cr1.modify(|_, w| w.lpms().bits(0b010));
-    }
-
+    let pwr = unsafe { &*pac::PWR::ptr() };
     let mut cp = unsafe { cortex_m::Peripherals::steal() };
+
+    pwr.scr.write(|w| {
+        w.wuf1().set_bit();
+        w.wuf2().set_bit();
+        w.wuf3().set_bit();
+        w.wuf4().set_bit();
+        w.wuf5().set_bit();
+        w
+    });
+
+    pwr.cr1.modify(|_, w| unsafe { w.lpms().bits(0b010) });
+
+    rprintln!("Go into Deep Sleep");
+
     cp.SCB.set_sleepdeep();
     cortex_m::asm::dsb();
     cortex_m::asm::wfi();
     cp.SCB.clear_sleepdeep();
 
     let _ = wakeup_timer.cancel();
+
+    rprintln!("Exit STOP2 for surface");
+}
+
+fn reinit_after_stop2() {
+    rprintln!("Waking up, reinit clocks");
+    let dp = unsafe { pac::Peripherals::steal() };
+
+    dp.RCC.ahb1enr.modify(|_, w| w.dma1en().set_bit());
+    dp.DBGMCU.cr.modify(|_, w| {
+        w.trace_ioen().set_bit();
+        w.dbg_sleep().set_bit();
+        w.dbg_stop().set_bit();
+        w.dbg_standby().set_bit()
+    });
+
+    let mut rcc = dp.RCC.constrain();
+    let mut flash_pac = dp.FLASH.constrain();
+    let mut pwr = dp.PWR.constrain(&mut rcc.apb1r1);
+
+    let _clocks = init_clocks(
+        rcc.cfgr,
+        &mut flash_pac.acr,
+        &mut pwr,
+        dp.TIM5,
+        &mut rcc.apb1r1,
+    );
 }
 
 pub fn sync_power_cut_indicator() {
@@ -911,7 +974,6 @@ unsafe fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
 //
 
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

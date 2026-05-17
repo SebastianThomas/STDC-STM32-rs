@@ -54,12 +54,15 @@ impl SurfaceModeState {
     }
 }
 
-pub async fn run_surface_mode_tick<I: Write + Read + WriteRead, F: Flash>(
+pub async fn run_surface_mode_tick<I: Write + Read + WriteRead>(
     state: &mut SurfaceModeState,
     ms5849_i2c: &mut MS5849<I, ()>,
-    flash: &mut F,
-    latest_measurements: &mut crate::LatestMeasurements,
-) -> Option<SurfaceModeExit>
+    latest_measurements: crate::LatestMeasurements,
+) -> (
+    Option<SurfaceModeExit>,
+    crate::LatestMeasurements,
+    Option<(u32, Pa)>,
+)
 where
     <I as Read>::Error: Debug,
     <I as Write>::Error: Debug,
@@ -67,7 +70,7 @@ where
 {
     let millis_since = millis_tim5_since(state.last_polled_millis);
     if millis_since < SURFACE_POLL_INTERVAL_MILLIS {
-        return None;
+        return (None, latest_measurements, None);
     }
     rprintln!(
         "Updating measurements (not up to date: {} ms)",
@@ -79,11 +82,11 @@ where
         Some(p) => p,
         None => {
             rprintln!("Got error while measuring pressure");
-            return None;
+            return (None, latest_measurements, None);
         }
     };
     let temperature_c = ms5849_i2c.temperature();
-    latest_measurements.record_environment(
+    let latest_measurements = latest_measurements.record_environment(
         pressure,
         None,
         temperature_c,
@@ -94,20 +97,23 @@ where
         .flash_log_algorithm
         .next_iter(state.last_logged_millis, current_measurement_millis);
     let next_flash_log = next_flash_iter.map(|n| state.last_logged_millis + n);
-    if let Ok(n) = next_flash_log
-        && n >= current_measurement_millis
-    {
-        log_data_flash(
-            current_measurement_millis,
-            pressure,
-            latest_measurements,
-            flash,
-            state,
-        )
-    }
     state.last_polled_millis = current_measurement_millis;
 
-    handle_surface_mode_tick_end(ms5849_i2c, state)
+    let flash_log = if let Ok(n) = next_flash_log {
+        if n >= current_measurement_millis {
+            Some((current_measurement_millis, pressure))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    (
+        handle_surface_mode_tick_end(ms5849_i2c, state),
+        latest_measurements,
+        flash_log,
+    )
 }
 
 fn handle_surface_mode_tick_end<I: Write + Read + WriteRead>(
@@ -150,7 +156,7 @@ where
     }
 }
 
-fn log_data_flash<F: Flash>(
+pub fn log_data_flash<F: Flash>(
     current_measurement_millis: u32,
     pressure: Pa,
     latest_measurements: &crate::LatestMeasurements,

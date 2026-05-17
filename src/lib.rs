@@ -6,8 +6,8 @@
 #![feature(generic_const_exprs)]
 
 pub mod algorithms;
-pub mod constants;
 pub mod benchmarking;
+pub mod constants;
 pub mod macros;
 
 #[cfg(target_os = "none")]

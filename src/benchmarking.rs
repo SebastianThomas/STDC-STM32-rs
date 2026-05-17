@@ -160,22 +160,6 @@ pub fn log_sample(sample: &BenchmarkSample) {
 pub fn log_sample(_sample: &BenchmarkSample) {}
 
 #[cfg(all(target_os = "none", feature = "online_benchmarking"))]
-pub fn record_wfi() {
-    free(|cs| {
-        *WFI_COUNT.borrow(cs).borrow_mut() += 1;
-    });
-}
-
-#[cfg(all(target_os = "none", not(feature = "online_benchmarking")))]
-pub fn record_wfi() {}
-
-#[cfg(all(not(target_os = "none"), test))]
-pub fn record_wfi() {}
-
-#[cfg(all(not(target_os = "none"), not(test)))]
-pub fn record_wfi() {}
-
-#[cfg(all(target_os = "none", feature = "online_benchmarking"))]
 pub fn wfi_count() -> u64 {
     free(|cs| *WFI_COUNT.borrow(cs).borrow())
 }

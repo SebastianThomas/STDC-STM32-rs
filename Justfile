@@ -1,5 +1,7 @@
 set shell := ["zsh", "-eu", "-o", "pipefail", "-c"]
 
+features := env_var_or_default('JUST_EMBED_FEATURES', '')
+
 default:
 	just --list
 
@@ -20,10 +22,11 @@ test-bench:
 	cargo test --target x86_64-apple-darwin --lib --tests benchmark_tests -- --nocapture
 
 embed:
-	cargo embed
+	# Example: just features=online_benchmarking,bluetooth,display embed
+	if [[ -n "{{features}}" ]]; then cargo embed --features "{{features}}"; else cargo embed; fi
 
 embed-bench:
-	cargo embed --features online_benchmarking
+	just features=online_benchmarking embed
 
 ci:
 	just c

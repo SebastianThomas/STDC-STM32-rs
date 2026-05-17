@@ -35,6 +35,7 @@
     "/^cargo test --target x86_64-apple-darwin --lib --tests benchmark_tests -- --nocapture --test-threads=1$/": {
       "approve": true,
       "matchCommandLine": true
-    }
+    },
+    "cargo check": true
   }
 }

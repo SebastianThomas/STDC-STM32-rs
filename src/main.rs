@@ -8,30 +8,25 @@
 use core::{
     cell::RefCell,
     sync::atomic::{AtomicBool, Ordering},
-    task::{Context, Poll},
 };
 
 use cortex_m::interrupt::{Mutex as CmMutex, free};
 
-use cortex_m_rt::exception;
 use modes::{AppMode, SurfaceModeExit};
 use rtic_monotonics::{fugit::Duration, stm32::prelude::*};
 use rtt_target::{rprintln, rtt_init_print};
 
 #[cfg(not(feature = "online_benchmarking"))]
-use stm32l4xx_hal::hal::timer::{Cancel, CountDown};
+use stm32l4xx_hal::hal::timer::Cancel;
 use stm32l4xx_hal::{
     gpio::{Edge, ExtiPin},
     hal::spi::MODE_0,
     i2c::{self, I2c},
-    pac::{self, TIM5},
+    pac::{self},
     prelude::*,
-    pwr::Pwr,
-    rcc::{APB1R1, Clocks, PllConfig, PllDivider},
     rtc::{Rtc, RtcClockSource, RtcConfig, RtcWakeupClockSource},
     serial::Serial,
     spi::Spi,
-    timer::Timer,
 };
 
 use stdc_stm32_rs::{
@@ -57,6 +52,15 @@ use stdc_diving_algorithms::{
 };
 pub use types::*;
 
+mod runtime;
+pub use runtime::board::{
+    create_battery_status, create_display, create_flash_device, create_pressure_sensor,
+    init_clocks, sync_dive_mode_indicator, sync_power_cut_indicator, transition_into_surface,
+};
+
+#[cfg(not(feature = "online_benchmarking"))]
+pub use runtime::board::{enter_stop2_for_surface, reinit_after_stop2};
+
 #[cfg(feature = "bluetooth")]
 const ENABLE_BLUETOOTH: bool = true;
 static SERIAL_NUMBER: [u8; 4] = [0, 0, 0, 0];
@@ -76,7 +80,6 @@ static POWER_CUT_RED_INDICATOR: CmMutex<RefCell<Option<Pc9Output>>> =
     CmMutex::new(RefCell::new(None));
 #[cfg(feature = "bluetooth")]
 static BLUETOOTH_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
-static RTC_WAKEUP_INTERRUPT_TRIGGERED: AtomicBool = AtomicBool::new(false);
 
 #[rtic::app(device = stm32l4xx_hal::pac, peripherals = true, dispatchers = [EXTI0])]
 mod app {
@@ -176,41 +179,15 @@ mod app {
             },
         );
 
-        // let exti = unsafe { &*pac::EXTI::ptr() };
-        // rtc.listen(pac::EXTI, stm32l4xx_hal::rtc::Event::WakeupTimer);
         let exti = unsafe { &mut *(pac::EXTI::ptr() as *mut EXTI) };
         rtc.listen(exti, Event::WakeupTimer);
         let is_interrupt = rtc.check_interrupt(Event::WakeupTimer, true);
         rprintln!("Was interrupt before: {}", is_interrupt);
-
-        RTC_WAKEUP_INTERRUPT_TRIGGERED.store(false, Ordering::Release);
-        let mut wakeup_timer = rtc.wakeup_timer();
-        wakeup_timer.start(1u32);
         unsafe {
             cortex_m::peripheral::NVIC::unmask(pac::Interrupt::RTC_WKUP);
         }
 
-        let mut wakeup_interrupt_seen = false;
-        for _ in 0..4 {
-            cortex_m::asm::wfi();
-            if RTC_WAKEUP_INTERRUPT_TRIGGERED.load(Ordering::Acquire) {
-                wakeup_interrupt_seen = true;
-                break;
-            }
-        }
-
-        rprintln!("RTC wakeup interrupt observed: {}", wakeup_interrupt_seen);
-    let _ = wakeup_timer.cancel();
-
-        // let rtc_ptr = unsafe { &*stm32l4xx_hal::pac::RTC::ptr() };
-        // rtc_ptr.cr.modify(|_, w| w.wutie().set_bit());
-
-        unsafe {
-            cortex_m::peripheral::NVIC::unmask(pac::Interrupt::RTC_WKUP);
-            cortex_m::peripheral::NVIC::unmask(pac::Interrupt::RTC_ALARM);
-        }
-
-        rprintln!("RTC set up");
+        rprintln!("RTC & WakeupTimer set up");
 
         // PA13: JTMS-SWDIO
         let _tms =
@@ -262,15 +239,11 @@ mod app {
         );
         let (debug_tx, debug_rx) = debug_uart.split();
         rprintln!("Logger to UART still available; will use rprintln and UART once.");
-        // Use the UART logger once to avoid dead-code for `UartLogger` / `ExternalLogger`.
         {
             use stdc_stm32_rs::components::uart_log::{ExternalLogger, UartLogger};
             let mut uart_logger = UartLogger::new(debug_tx, debug_rx);
-            if let Err(_) = <UartLogger<_, _> as ExternalLogger>::log_bytes(
-                &mut uart_logger,
-                b"Initialized UART\r\n",
-            ) {
-                rprintln!("UART logger write failed");
+            if let Err(e) = uart_logger.log_bytes(b"Initialized UART\r\n") {
+                rprintln!("UART logger write failed: {:?}", e);
             }
         }
 
@@ -345,7 +318,7 @@ mod app {
             clocks,
             &mut apb1r1,
         );
-        let mut flash: FlashDevice = SpiFlash::new(0, 1 << 22, flash_spi, flash_cs_nss);
+        let mut flash: FlashDevice = create_flash_device(flash_spi, flash_cs_nss);
 
         rprintln!("Flash Device set up");
 
@@ -397,7 +370,7 @@ mod app {
             i2c::Config::new(100.kHz(), clocks),
             &mut apb1r1,
         );
-        let ms5849_i2c: SensorMs5849 = create_sensor_ms5849(sensor_i2c);
+        let ms5849_i2c: SensorMs5849 = create_pressure_sensor(sensor_i2c);
 
         rprintln!("Pressure Sensor set up");
 
@@ -513,7 +486,6 @@ mod app {
         rprintln!("First idle execution");
         let mut i: u64 = 0;
         loop {
-            benchmarking::record_wfi();
             #[cfg(not(feature = "online_benchmarking"))]
             cortex_m::asm::wfi();
 
@@ -528,23 +500,13 @@ mod app {
     }
 
     #[cfg(feature = "bluetooth")]
-    fn request_bluetooth_mode() {
-        if BLUETOOTH_MODE_ACTIVE
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            if task_bluetooth_mode::spawn().is_err() {
-                BLUETOOTH_MODE_ACTIVE.store(false, Ordering::Release);
-            }
-        }
-    }
-
-    #[cfg(feature = "bluetooth")]
     #[task(binds = EXTI1, priority = 2, local = [bluetooth_button])]
     fn task_bluetooth_button(cx: task_bluetooth_button::Context) {
         if cx.local.bluetooth_button.check_interrupt() {
             cx.local.bluetooth_button.clear_interrupt_pending_bit();
-            request_bluetooth_mode();
+            runtime::bluetooth::request_bluetooth_mode(&BLUETOOTH_MODE_ACTIVE, || {
+                task_bluetooth_mode::spawn()
+            });
         }
     }
 
@@ -610,7 +572,6 @@ mod app {
         unsafe {
             (*pac::EXTI::ptr()).pr1.write(|w| w.bits(1 << 20));
         }
-        RTC_WAKEUP_INTERRUPT_TRIGGERED.store(true, Ordering::Release);
         rprintln!("RTC wakeup interrupt fired");
     }
 
@@ -774,239 +735,4 @@ mod app {
             tasks::battery::wait_for_next_battery_update().await;
         }
     }
-}
-
-fn init_clocks(
-    cfgr: stm32l4xx_hal::rcc::CFGR,
-    acr: &mut stm32l4xx_hal::flash::ACR,
-    pwr: &mut Pwr,
-    tim5: TIM5,
-    apb1r1: &mut APB1R1,
-) -> Clocks {
-    let clocks = cfgr
-        .sysclk_with_pll(8.MHz(), PllConfig::new(2, 8, PllDivider::Div8))
-        .freeze(acr, pwr);
-
-    // Timer input clock = PCLK1 * 2 when APB1 prescaler > 1.
-    let tim2_clk = if clocks.pclk1() == clocks.hclk() {
-        clocks.pclk1()
-    } else {
-        clocks.pclk1() * 2
-    };
-    rprintln!("TIM2 input clock: {:?} MHz", tim2_clk.to_MHz());
-    Mono::start(tim2_clk.to_Hz());
-
-    rprintln!(
-        "Clocks: Sysclk: {:?}, PCLK1: {:?}, PCLK2: {:?}, HCLK: {:?}, ",
-        clocks.sysclk(),
-        clocks.pclk1(),
-        clocks.pclk2(),
-        clocks.hclk()
-    );
-
-    Timer::free_running_tim5(tim5, clocks, 1.kHz(), false, apb1r1);
-
-    clocks
-}
-
-fn create_sensor_ms5849(i2c: SensorI2c) -> SensorMs5849 {
-    let mut fut = MS5849::new_i2c(i2c);
-    let mut fut = unsafe { core::pin::Pin::new_unchecked(&mut fut) };
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    loop {
-        match fut.as_mut().poll(&mut cx) {
-            Poll::Ready(val) => break val,
-            Poll::Pending => {}
-        };
-        // TODO: Insert Delay or so here
-    }
-}
-
-fn create_battery_status(battery_gauge_i2c: BatteryI2c) -> BatteryGauge {
-    let mut fut = BatteryStatusI2C::new(battery_gauge_i2c, Max17262Variant::R);
-    let mut fut = unsafe { core::pin::Pin::new_unchecked(&mut fut) };
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    loop {
-        match fut.as_mut().poll(&mut cx) {
-            Poll::Ready(val) => break val,
-            Poll::Pending => {}
-        };
-        // TODO: Insert Delay or so here
-    }
-}
-
-#[cfg(not(feature = "display"))]
-fn create_display<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin>(
-    display_en: EN,
-    display_spi: Spi<SPI, PINS>,
-    spi_reset: RST,
-    not_data_command: NDC,
-) -> SpiDisplay<SPI, PINS, EN, RST, NDC> {
-    SpiDisplay::new(display_en, display_spi, spi_reset, not_data_command)
-}
-
-#[cfg(feature = "display")]
-fn create_display<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin>(
-    display_en: EN,
-    display_spi: Spi<SPI, PINS>,
-    spi_reset: RST,
-    not_data_command: NDC,
-) -> SpiDisplay<SPI, PINS, EN, RST, NDC>
-where
-    Spi<SPI, PINS>: _embedded_hal_blocking_spi_Write<u8>,
-{
-    let mut display = SpiDisplay::new(display_en, display_spi, spi_reset, not_data_command);
-    match display.turn_on() {
-        Ok(_) => rprintln!("Turned on the display."),
-        Err(e) => {
-            rprintln!("Failed to turn on the display");
-            rprintln!("{:?}", e.details.as_bytes());
-        }
-    }
-    match display.show_splashscreen(&BLUETOOTH_NAME) {
-        Ok(_) => rprintln!("Showing Splash Screen"),
-        Err(e) => {
-            rprintln!("Failed to show the Splash Screen");
-            rprintln!("{:?}", e.details.as_bytes());
-        }
-    }
-    display
-}
-
-fn transition_into_surface(
-    mode: &mut AppMode,
-    surface_mode_state: &mut modes::surface::SurfaceModeState,
-) {
-    *mode = AppMode::Surface;
-    surface_mode_state.reset_for_entry();
-}
-
-#[cfg(not(feature = "online_benchmarking"))]
-async fn enter_stop2_for_surface(rtc: &mut Rtc) {
-    let mut wakeup_timer = rtc.wakeup_timer();
-    wakeup_timer.start(STOP2_SURFACE_SLEEP_SECONDS);
-
-    let pwr = unsafe { &*pac::PWR::ptr() };
-    let mut cp = unsafe { cortex_m::Peripherals::steal() };
-
-    pwr.scr.write(|w| {
-        w.wuf1().set_bit();
-        w.wuf2().set_bit();
-        w.wuf3().set_bit();
-        w.wuf4().set_bit();
-        w.wuf5().set_bit();
-        w
-    });
-
-    pwr.cr1.modify(|_, w| unsafe { w.lpms().bits(0b010) });
-
-    rprintln!("Go into Deep Sleep");
-
-    cp.SCB.set_sleepdeep();
-    cortex_m::asm::dsb();
-    cortex_m::asm::wfi();
-    cp.SCB.clear_sleepdeep();
-
-    let _ = wakeup_timer.cancel();
-
-    rprintln!("Exit STOP2 for surface");
-}
-
-fn reinit_after_stop2() {
-    rprintln!("Waking up, reinit clocks");
-    let dp = unsafe { pac::Peripherals::steal() };
-
-    dp.RCC.ahb1enr.modify(|_, w| w.dma1en().set_bit());
-    dp.DBGMCU.cr.modify(|_, w| {
-        w.trace_ioen().set_bit();
-        w.dbg_sleep().set_bit();
-        w.dbg_stop().set_bit();
-        w.dbg_standby().set_bit()
-    });
-
-    let mut rcc = dp.RCC.constrain();
-    let mut flash_pac = dp.FLASH.constrain();
-    let mut pwr = dp.PWR.constrain(&mut rcc.apb1r1);
-
-    let _clocks = init_clocks(
-        rcc.cfgr,
-        &mut flash_pac.acr,
-        &mut pwr,
-        dp.TIM5,
-        &mut rcc.apb1r1,
-    );
-}
-
-pub fn sync_power_cut_indicator() {
-    free(|cs| {
-        if let Some(red_indicator) = POWER_CUT_RED_INDICATOR.borrow(cs).borrow_mut().as_mut() {
-            if modes::is_power_cut_safe() {
-                let _ = red_indicator.set_high();
-            } else {
-                let _ = red_indicator.set_low();
-            }
-        }
-    });
-}
-
-fn sync_dive_mode_indicator(dive_mode_indicator: &mut Pc8Output, mode: &AppMode) {
-    if matches!(mode, AppMode::Dive) {
-        let _ = dive_mode_indicator.set_low();
-    } else {
-        let _ = dive_mode_indicator.set_high();
-    }
-}
-
-#[exception]
-unsafe fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
-    rprintln!("HARDFAULT: {:?}", ef);
-    loop {}
-}
-
-// Copied from panic_probe
-// Panic handler for `probe-run`.
-//
-// When this panic handler is used, panics will make `probe-run` print a backtrace and exit with a
-// non-zero status code, indicating failure. This building block can be used to run on-device
-// tests.
-//
-
-use core::panic::PanicInfo;
-
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    static PANICKED: AtomicBool = AtomicBool::new(false);
-    rprintln!("PANIC");
-
-    cortex_m::interrupt::disable();
-
-    // Guard against infinite recursion, just in case.
-    if !PANICKED.load(Ordering::Relaxed) {
-        PANICKED.store(true, Ordering::Relaxed);
-
-        rprintln!("{}", info);
-    }
-
-    hard_fault();
-}
-
-/// Trigger a `HardFault` via `udf` instruction.
-#[cfg(target_os = "none")]
-pub fn hard_fault() -> ! {
-    // If `UsageFault` is enabled, we disable that first, since otherwise `udf` will cause that
-    // exception instead of `HardFault`.
-    {
-        const SHCSR: *mut u32 = 0xE000ED24usize as _;
-        const USGFAULTENA: usize = 18;
-
-        unsafe {
-            let mut shcsr = core::ptr::read_volatile(SHCSR);
-            shcsr &= !(1 << USGFAULTENA);
-            core::ptr::write_volatile(SHCSR, shcsr);
-        }
-    }
-
-    cortex_m::asm::udf();
 }

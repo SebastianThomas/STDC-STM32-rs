@@ -582,9 +582,8 @@ pub fn ensure_bluetooth_initialized(
     bluetooth: &mut Option<crate::BluetoothModule>,
     bluetooth_initialized: &mut bool,
 ) -> bool {
-    if !crate::ENABLE_BLUETOOTH {
-        return true;
-    }
+    #[cfg(not(feature = "bluetooth"))]
+    return true;
 
     if *bluetooth_initialized {
         return bluetooth.is_some();
@@ -631,5 +630,3 @@ pub fn ensure_bluetooth_initialized(
         }
     }
 }
-
-

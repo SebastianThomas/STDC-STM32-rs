@@ -4,6 +4,8 @@ use stm32l4xx_hal::hal::{
     serial::{Read, Write},
 };
 
+const COMMAND_MODE_RESPONSE_TIMEOUT_POLLS: usize = 250_000;
+
 pub trait BluetoothModule {
     type TX: Write<u8, Error = Self::UartError>;
     type RX: Read<u8, Error = Self::UartError>;
@@ -50,6 +52,7 @@ pub trait BluetoothModule {
     }
 }
 
+#[derive(Debug)]
 pub enum Error<E> {
     Uart(E),
     InvalidResponse,
@@ -77,11 +80,21 @@ where
     pub fn initialize_bluetooth(
         self,
         bluetooth_name: &[u8],
-    ) -> Result<UartBluetoothModule<TX, RX, TXI>, Error<E>> {
-        let mut bluetooth = self.enter_command_mode()?;
-        bluetooth.set_device_name(bluetooth_name)?;
-        bluetooth.start_advertising()?;
-        rprintln!("Started advertising successfully");
+    ) -> Result<UartBluetoothModule<TX, RX, TXI>, (Error<E>, UartBluetoothModule<TX, RX, TXI>)> {
+        rprintln!("Entering CMD Mode");
+        let mut bluetooth = match self.enter_command_mode() {
+            Ok(bluetooth) => bluetooth,
+            Err((error, bluetooth)) => return Err((error, bluetooth)),
+        };
+        rprintln!("Setting Device Name");
+        if let Err(error) = bluetooth.set_device_name(bluetooth_name) {
+            return Err((error, bluetooth.into_module()));
+        }
+        rprintln!("Starting Advertising");
+        if let Err(error) = bluetooth.start_advertising() {
+            return Err((error, bluetooth.into_module()));
+        }
+        rprintln!("Exit CMD Mode");
         bluetooth.exit_command_mode()
     }
 }
@@ -140,15 +153,24 @@ where
     RX: Read<u8, Error = E>,
     TXI: InputPin,
 {
-    /// Requires a guard time (~100 ms silence on UART) before sending "$$$".
-    pub fn enter_command_mode(self) -> Result<UartBluetoothCommandMode<TX, RX, TXI>, Error<E>> {
+    /// Requires a guard time (~86 ms silence on UART) before sending "$$$".
+    pub fn enter_command_mode(
+        self,
+    ) -> Result<UartBluetoothCommandMode<TX, RX, TXI>, (Error<E>, UartBluetoothModule<TX, RX, TXI>)> {
         let mut command_mode = UartBluetoothCommandMode {
             uart_tx: self.uart_tx,
             uart_rx: self.uart_rx,
             tx_ind: self.tx_ind,
         };
-        command_mode.write_bytes(b"$$$")?;
-        command_mode.wait_for_response(b"CMD>")?;
+        rprintln!("Writing Bytes");
+        if let Err(error) = command_mode.write_bytes(b"$$$") {
+            return Err((error, command_mode.into_module()));
+        }
+        rprintln!("Wrote Start Bytes");
+        if let Err(error) = command_mode.wait_for_response(b"CMD>") {
+            return Err((error, command_mode.into_module()));
+        }
+        rprintln!("Found CMD Response");
         Ok(command_mode)
     }
 
@@ -167,13 +189,25 @@ where
     RX: Read<u8, Error = E>,
     TXI: InputPin,
 {
-    pub fn exit_command_mode(self) -> Result<UartBluetoothModule<TX, RX, TXI>, Error<E>> {
+    fn into_module(self) -> UartBluetoothModule<TX, RX, TXI> {
+        UartBluetoothModule {
+            uart_tx: self.uart_tx,
+            uart_rx: self.uart_rx,
+            tx_ind: self.tx_ind,
+        }
+    }
+
+    pub fn exit_command_mode(
+        self,
+    ) -> Result<UartBluetoothModule<TX, RX, TXI>, (Error<E>, UartBluetoothModule<TX, RX, TXI>)> {
         let mut normal_mode = UartBluetoothModule {
             uart_tx: self.uart_tx,
             uart_rx: self.uart_rx,
             tx_ind: self.tx_ind,
         };
-        normal_mode.write_bytes(b"---")?;
+        if let Err(error) = normal_mode.write_bytes(b"---") {
+            return Err((error, normal_mode));
+        }
         Ok(normal_mode)
     }
 
@@ -204,22 +238,41 @@ where
     }
 
     fn wait_for_ok(&mut self) -> Result<(), Error<E>> {
-        let mut buf = [0u8; 32];
-        let n = self.read_line(&mut buf)?;
-        if &buf[..n] == b"AOK" {
-            Ok(())
-        } else {
-            Err(Error::InvalidResponse)
-        }
+        self.wait_for_response(b"AOK")
     }
 
     fn wait_for_response(&mut self, expected: &[u8]) -> Result<(), Error<E>> {
         let mut buf = [0u8; 64];
-        let n = self.read_line(&mut buf)?;
-        if &buf[..n] == expected {
-            Ok(())
-        } else {
-            Err(Error::InvalidResponse)
+        let mut len = 0usize;
+        let mut idle_polls = 0usize;
+
+        loop {
+            match self.try_read_byte()? {
+                Some(b) => {
+                    idle_polls = 0;
+
+                    if b == b'\r' {
+                        return if &buf[..len] == expected {
+                            Ok(())
+                        } else {
+                            Err(Error::InvalidResponse)
+                        };
+                    }
+
+                    if len >= buf.len() {
+                        return Err(Error::InvalidResponse);
+                    }
+
+                    buf[len] = b;
+                    len += 1;
+                }
+                None => {
+                    idle_polls += 1;
+                    if idle_polls >= COMMAND_MODE_RESPONSE_TIMEOUT_POLLS {
+                        return Err(Error::Timeout);
+                    }
+                }
+            }
         }
     }
 

@@ -448,6 +448,10 @@ mod app {
         let _ = task_mode_tick::spawn();
         let _ = task_battery_update::spawn();
 
+        runtime::bluetooth::request_bluetooth_mode(&BLUETOOTH_MODE_ACTIVE, || {
+            task_bluetooth_mode::spawn()
+        });
+
         rprintln!("Finished init task, returning");
 
         (
@@ -520,12 +524,19 @@ mod app {
     ])]
     async fn task_bluetooth_mode(mut cx: task_bluetooth_mode::Context) {
         // Bluetooth mode task - spawned by PA1 button interrupt
-        // Currently a placeholder for the complete Bluetooth task implementation
         cx.local.bluetooth_mode_state.on_enter();
+        let mut bluetooth_command_mode_guard_done = false;
+
+        let mut timeouts: u32 = 0;
 
         loop {
             if !BLUETOOTH_MODE_ACTIVE.load(Ordering::Acquire) {
                 break;
+            }
+
+            if !bluetooth_command_mode_guard_done {
+                Mono::delay(120u64.millis()).await;
+                bluetooth_command_mode_guard_done = true;
             }
 
             // Try to ensure Bluetooth hardware is initialized using shared clocks/apb1r1
@@ -543,23 +554,31 @@ mod app {
             });
 
             if !bluetooth_ready {
-                // wait and retry initialization
                 Mono::delay(BLUETOOTH_TASK_DELAY_MILLIS.millis()).await;
                 continue;
             }
 
-            // Bluetooth initialized; full Bluetooth mode behavior (flash access, etc.)
-            // will be implemented later with proper coordination.
-            Mono::delay(BLUETOOTH_TASK_DELAY_MILLIS.millis()).await;
             if let Some(bluetooth) = cx.local.bluetooth.as_mut() {
                 cx.shared.flash.lock(|flash| {
-                    let _ = modes::bluetooth::run_bluetooth_mode_tick(
+                    let timeout = modes::bluetooth::run_bluetooth_mode_tick(
                         &mut cx.local.bluetooth_mode_state,
                         bluetooth,
                         flash,
                     );
+                    if timeout {
+                        rprintln!("Bluetooth Timeout #{}", timeouts);
+                        timeouts += 1;
+                        if timeouts >= 20 {
+                            BLUETOOTH_MODE_ACTIVE.store(false, Ordering::Release);
+                        }
+                    } else {
+                        timeouts = 0;
+                    }
                 });
             }
+            rprintln!("Bluetooth Tick Delay");
+            Mono::delay(BLUETOOTH_TASK_DELAY_MILLIS.millis()).await;
+            rprintln!("Bluetooth Tick After Delay");
         }
 
         BLUETOOTH_MODE_ACTIVE.store(false, Ordering::Release);
@@ -653,6 +672,11 @@ mod app {
                     }
                 }
                 AppMode::Dive => {
+                    if BLUETOOTH_MODE_ACTIVE.load(Ordering::Acquire) {
+                        rprintln!("Deactivate Bluetooth");
+                        BLUETOOTH_MODE_ACTIVE.store(false, Ordering::Release);
+                    }
+
                     let Some(runtime) = cx.local.dive_runtime.as_mut() else {
                         transition_into_surface(cx.local.mode, cx.local.surface_mode_state);
                         sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);

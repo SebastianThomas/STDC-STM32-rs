@@ -621,13 +621,15 @@ pub fn ensure_bluetooth_initialized(
         Ok(initialized_module) => {
             *bluetooth = Some(initialized_module);
             *bluetooth_initialized = true;
+            rprintln!("Finished initializing Bluetooth");
             true
         }
-        Err(_) => {
-            rprintln!("Bluetooth lazy init failed");
+        Err((e, module)) => {
+            *bluetooth = Some(module);
+            rprintln!("Bluetooth lazy init failed: {:?}", e);
             false
         }
     }
 }
 
-// UART logger removed; use rprintln! for debug output
+

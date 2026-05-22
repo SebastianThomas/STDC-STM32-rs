@@ -94,7 +94,19 @@ const BLUETOOTH_TASK_DELAY_MILLIS: u64 = 200;
 #[cfg(not(feature = "online_benchmarking"))]
 const STOP2_SURFACE_SLEEP_SECONDS: u32 = 2;
 
-const GASES: [GasMix<f32>; 1] = [gas::AIR];
+#[allow(unused)]
+const NX100: GasMix<f32> = match GasMix::new(0.99, 0.0) {
+    Ok(g) => g,
+    Err(_) => unreachable!(),
+};
+#[allow(unused)]
+const NX50: GasMix<f32> = match GasMix::new(0.50, 0.000_005_2) {
+    Ok(g) => g,
+    Err(_) => unreachable!(),
+};
+const NR_GASES: usize = 2;
+const GASES: [GasMix<f32>; NR_GASES] = [gas::AIR, NX50];
+const GASES_ENABLED: [bool; NR_GASES] = [true, true];
 
 static POWER_CUT_RED_INDICATOR: CmMutex<RefCell<Option<Pc9Output>>> =
     CmMutex::new(RefCell::new(None));
@@ -689,6 +701,7 @@ mod app {
                                     cx.local.rtc,
                                     surface_pressure,
                                     &GASES,
+                                    &GASES_ENABLED,
                                 )
                             }));
                             TaskModeTickResult::DirectContinue

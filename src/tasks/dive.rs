@@ -55,6 +55,7 @@ pub fn update_deco_schedule_if_due<const NUM_GASES: usize>(
     state: &mut DiveTaskState,
     loading: &TissuesLoading<{ NUM_TISSUES }, Pa>,
     gases: &[GasMix<f32>; NUM_GASES],
+    gases_enabled: &[bool; NUM_GASES],
     deco_settings: &DecoSettings<Pa>,
 ) -> bool
 where
@@ -72,7 +73,7 @@ where
     state.last_deco_update_millis = millis_tim5();
 
     let (result, sample) = benchmarking::measure("dive.deco_schedule", || {
-        calc_deco_schedule(loading, gases, deco_settings)
+        calc_deco_schedule(loading, gases, gases_enabled, deco_settings)
     });
     benchmarking::log_sample(&sample);
 

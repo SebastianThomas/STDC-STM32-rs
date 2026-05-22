@@ -39,6 +39,7 @@ impl const Default for DisplayState {
 impl DisplayState {
     pub fn new<const NUM_GASES: usize>(
         gases: &[GasMix<f32>; NUM_GASES],
+        gases_enabled: &[bool; NUM_GASES],
         deco_settings: &DecoSettings<Pa>,
     ) -> Self {
         DisplayState {
@@ -47,6 +48,7 @@ impl DisplayState {
             stop_schedule: calc_deco_schedule::<MAX_STOP_NUMS, NUM_GASES>(
                 &ZERO_LOADING_AIR,
                 gases,
+                gases_enabled,
                 deco_settings,
             ),
         }

@@ -56,6 +56,7 @@ pub struct DiveRuntime<const NR_GASES: usize> {
     surface_pressure: Pa,
     deco_settings: DecoSettings<Pa>,
     gases: [GasMix<f32>; NR_GASES],
+    gases_enabled: [bool; NR_GASES],
     loading: TissuesLoading<{ NUM_TISSUES }, Pa>,
     current_gas_mode_idx: CurrentDiveModeWithInfo,
     last_measurement_millis: u32,
@@ -78,6 +79,7 @@ pub fn setup_dive_mode<F: Flash, const NR_GASES: usize>(
     rtc: &Rtc,
     surface_pressure: Pa,
     gases: &[GasMix<f32>; NR_GASES],
+    gases_enabled: &[bool; NR_GASES],
 ) -> DiveRuntime<NR_GASES>
 where
     [(); NR_GASES * 3]: Sized,
@@ -141,6 +143,7 @@ where
         surface_pressure,
         deco_settings,
         gases: *gases,
+        gases_enabled: *gases_enabled,
         loading,
         current_gas_mode_idx,
         last_measurement_millis: dive_start_millis,
@@ -208,6 +211,7 @@ where
                 &mut runtime.max_depth,
                 &mut runtime.loading,
                 &runtime.gases,
+                &runtime.gases_enabled,
                 &runtime.current_gas_mode_idx,
             );
             flash_log = flash_log_tick_plan(
@@ -250,12 +254,16 @@ where
         }
     }
 
-    let _ = update_deco_schedule_if_due(
+    let completed = update_deco_schedule_if_due(
         &mut runtime.task_state,
         &runtime.loading,
         &runtime.gases,
+        &runtime.gases_enabled,
         &runtime.deco_settings,
     );
+    if !completed {
+        rprintln!("Could not complete deco schedule");
+    }
 
     let _ = refresh_display_if_due(&mut runtime.task_state, display);
 
@@ -302,6 +310,7 @@ fn handle_depth_measurement<const NR_GASES: usize, const NUM_TISSUES: usize>(
     max_depth: &mut Pa,
     loading: &mut TissuesLoading<NUM_TISSUES, Pa>,
     gases: &[GasMix<f32>; NR_GASES],
+    _gases_enabled: &[bool; NR_GASES],
     current_gas_mode_idx: &CurrentDiveModeWithInfo,
 ) {
     let (_, sample) = benchmarking::measure("dive.rate_and_logging", || {

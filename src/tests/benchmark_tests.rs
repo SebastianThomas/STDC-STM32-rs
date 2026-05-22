@@ -108,6 +108,7 @@ fn benchmark_dive_profile(name: &'static str, measurements: &[DiveMeasurement<Pa
 
     let surface = Pa::new(101_325.0);
     let gases = [AIR];
+    let gases_enabled = [true; 1];
     let deco_settings = DecoSettings {
         gas_density_settings: GasDensitySettings::Limit {
             limit: MAX_GAS_DENSITY.to_pa(),
@@ -155,7 +156,7 @@ fn benchmark_dive_profile(name: &'static str, measurements: &[DiveMeasurement<Pa
             loading_samples.push(loading_sample);
 
             let (_, deco_sample) = benchmarking::measure("deco.schedule.window", || {
-                calc_deco_schedule::<16, 1>(&loading, &gases, &deco_settings)
+                calc_deco_schedule::<16, 1>(&loading, &gases, &gases_enabled, &deco_settings)
             });
             assert!(deco_sample.nanos > 0 || deco_sample.cycles > 0);
             deco_samples.push(deco_sample);

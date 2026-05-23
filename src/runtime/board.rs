@@ -208,3 +208,16 @@ pub fn sync_dive_mode_indicator(dive_mode_indicator: &mut Pc8Output, mode: &AppM
         let _ = dive_mode_indicator.set_high();
     }
 }
+
+#[cfg(feature = "online_benchmarking")]
+pub fn stop_mcu_after_benchmark() -> ! {
+    rprintln!("Benchmark complete, halting MCU");
+    loop {
+        cortex_m::asm::bkpt();
+    }
+}
+
+#[cfg(not(feature = "online_benchmarking"))]
+pub fn stop_mcu_after_benchmark() {
+    rprintln!("Benchmark complete (no-op on non-benchmark build)");
+}

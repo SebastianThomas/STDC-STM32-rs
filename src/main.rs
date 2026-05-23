@@ -784,6 +784,14 @@ mod app {
 
                         if let Some(surface_pressure) = dive_exit {
                             *cx.local.mode_surface_pressure = surface_pressure;
+                            #[cfg(feature = "online_benchmarking")]
+                            {
+                                if runtime.is_benchmark_profile {
+                                    rprintln!("Benchmark dive completed; stopping MCU");
+                                    crate::runtime::board::stop_mcu_after_benchmark();
+                                    unreachable!("MCU should be stopped after benchmarking sim finished")
+                                }
+                            }
                             *cx.local.dive_runtime = None;
                             transition_into_surface(cx.local.mode, cx.local.surface_mode_state);
                             TaskModeTickResult::DirectContinue

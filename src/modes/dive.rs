@@ -72,6 +72,8 @@ pub struct DiveRuntime<const NR_GASES: usize> {
     surfaced_since_millis: Option<u32>,
     flash_log_algorithm: DynamicDiffAimdRateAlgorithm<Pa>,
     task_state: DiveTaskState,
+    #[cfg(feature = "online_benchmarking")]
+    pub is_benchmark_profile: bool,
 }
 
 pub struct DiveFlashLog {
@@ -172,6 +174,8 @@ where
             Bar::new(0.2).to_pa(),
         ),
         task_state: DiveTaskState::new(dive_start_millis, surface_pressure.to_msw()),
+        #[cfg(feature = "online_benchmarking")]
+        is_benchmark_profile: true,
     }
 }
 

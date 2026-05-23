@@ -669,144 +669,147 @@ mod app {
     ])]
     async fn task_mode_tick(mut cx: task_mode_tick::Context) {
         loop {
-            let _ = benchmarking::measure_async_and_log("task.mode.tick.loop", async {
-                modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
-                sync_power_cut_indicator();
-                sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
-                rprintln!("Task Mode Tick in mode: {:?}", cx.local.mode);
+            modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
+            sync_power_cut_indicator();
+            sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
+            rprintln!("Task Mode Tick in mode: {:?}", cx.local.mode);
 
-                let result = task_mode_tick_iter(cx).await;
+            modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
+            sync_power_cut_indicator();
+            sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
+            rprintln!("Task Mode Tick in mode: {:?}", cx.local.mode);
 
-                rprintln!("Completed Task Mode Tick");
-                modes::power_cut_mark_safe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
-                match result {
-                    TaskModeTickResult::DirectContinue => {}
-                    TaskModeTickResult::Delay(duration) => {
-                        Mono::delay(duration).await;
-                    }
-                    TaskModeTickResult::EnterStop2 => {
-                        rprintln!("Going to sleep");
-                        #[cfg(not(feature = "online_benchmarking"))]
-                        {
-                            enter_stop2_for_surface(cx.local.rtc).await;
-                            reinit_after_stop2();
+            let result = benchmarking::measure_async_and_log("task.mode.tick.loop", async {
+                match *cx.local.mode {
+                    AppMode::Surface => {
+                        let (surface_exit, latest_measurements, surface_flash_log) =
+                            benchmarking::measure_async_and_log("task.surface.tick", async {
+                                let latest_measurements =
+                                    cx.shared.latest_measurements.lock(|m| *m);
+                                let (surface_exit, latest_measurements, surface_flash_log) =
+                                    modes::surface::run_surface_mode_tick(
+                                        cx.local.surface_mode_state,
+                                        cx.local.ms5849_i2c,
+                                        latest_measurements,
+                                    )
+                                    .await;
+                                (surface_exit, latest_measurements, surface_flash_log)
+                            })
+                            .await;
+                        rprintln!("Finished Surface Tick with exit mode {:?}", surface_exit);
+
+                        cx.shared
+                            .latest_measurements
+                            .lock(|m| *m = latest_measurements);
+                        if let Some((current_measurement_millis, pressure)) = surface_flash_log {
+                            cx.shared.flash.lock(|flash| {
+                                modes::surface::log_data_flash(
+                                    current_measurement_millis,
+                                    pressure,
+                                    &latest_measurements,
+                                    flash,
+                                    cx.local.surface_mode_state,
+                                );
+                            });
                         }
-                        #[cfg(feature = "online_benchmarking")]
-                        Mono::delay(1000u64.millis()).await;
+
+                        match surface_exit {
+                            Some(SurfaceModeExit::Dive(surface_pressure)) => {
+                                *cx.local.mode_surface_pressure = surface_pressure;
+                                *cx.local.mode = AppMode::Dive;
+                                *cx.local.dive_runtime = Some(cx.shared.flash.lock(|flash| {
+                                    modes::dive::setup_dive_mode(
+                                        flash,
+                                        cx.local.rtc,
+                                        surface_pressure,
+                                        &GASES,
+                                        &GASES_ENABLED,
+                                    )
+                                }));
+                                TaskModeTickResult::DirectContinue
+                            }
+                            None => {
+                                sync_dive_mode_indicator(
+                                    cx.local.dive_mode_indicator,
+                                    cx.local.mode,
+                                );
+                                TaskModeTickResult::EnterStop2
+                            }
+                        }
+                    }
+                    AppMode::Dive => {
+                        #[cfg(feature = "bluetooth")]
+                        if BLUETOOTH_MODE_ACTIVE.load(Ordering::Acquire) {
+                            rprintln!("Deactivate Bluetooth");
+                            BLUETOOTH_MODE_ACTIVE.store(false, Ordering::Release);
+                        }
+
+                        let Some(runtime) = cx.local.dive_runtime.as_mut() else {
+                            transition_into_surface(cx.local.mode, cx.local.surface_mode_state);
+                            sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
+                            return TaskModeTickResult::DirectContinue;
+                        };
+
+                        let (dive_exit, latest_measurements, flash_log) = {
+                            let latest_measurements = cx.shared.latest_measurements.lock(|m| *m);
+                            let (dive_exit, latest_measurements, flash_log) =
+                                modes::dive::run_dive_mode_tick(
+                                    runtime,
+                                    cx.local.display,
+                                    cx.local.ms5849_i2c,
+                                    latest_measurements,
+                                    &mut cx.local.latest_calculations_state,
+                                )
+                                .await;
+                            (dive_exit, latest_measurements, flash_log)
+                        };
+
+                        cx.shared
+                            .latest_measurements
+                            .lock(|m| *m = latest_measurements);
+                        if let Some(flash_log) = flash_log {
+                            cx.shared.flash.lock(|flash| {
+                                modes::dive::write_flash_log(
+                                    runtime,
+                                    flash,
+                                    flash_log,
+                                    &latest_measurements,
+                                );
+                            });
+                        }
+
+                        if let Some(surface_pressure) = dive_exit {
+                            *cx.local.mode_surface_pressure = surface_pressure;
+                            *cx.local.dive_runtime = None;
+                            transition_into_surface(cx.local.mode, cx.local.surface_mode_state);
+                            TaskModeTickResult::DirectContinue
+                        } else {
+                            TaskModeTickResult::Delay(200_u64.millis())
+                        }
                     }
                 }
-                Mono::delay(1u64.millis()).await;
             })
             .await;
+            rprintln!("Completed Task Mode Tick");
+            modes::power_cut_mark_safe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
+            match result {
+                TaskModeTickResult::DirectContinue => {}
+                TaskModeTickResult::Delay(duration) => {
+                    Mono::delay(duration).await;
+                }
+                TaskModeTickResult::EnterStop2 => {
+                    rprintln!("Going to sleep");
+                    #[cfg(not(feature = "online_benchmarking"))]
+                    {
+                        enter_stop2_for_surface(cx.local.rtc).await;
+                        reinit_after_stop2();
+                    }
+                    #[cfg(feature = "online_benchmarking")]
+                    Mono::delay(1000u64.millis()).await;
+                }
+            }
+            Mono::delay(1u64.millis()).await;
         }
-    }
-
-    async fn task_mode_tick_iter(mut cx: task_mode_tick::Context) -> TaskModeTickResult {
-        return match *cx.local.mode {
-            AppMode::Surface => {
-                let (surface_exit, latest_measurements, surface_flash_log) =
-                    benchmarking::measure_async_and_log("task.surface.tick", async {
-                        let latest_measurements = cx.shared.latest_measurements.lock(|m| *m);
-                        let (surface_exit, latest_measurements, surface_flash_log) =
-                            modes::surface::run_surface_mode_tick(
-                                cx.local.surface_mode_state,
-                                cx.local.ms5849_i2c,
-                                latest_measurements,
-                            )
-                            .await;
-                        (surface_exit, latest_measurements, surface_flash_log)
-                    })
-                    .await;
-                rprintln!("Finished Surface Tick with exit mode {:?}", surface_exit);
-
-                cx.shared
-                    .latest_measurements
-                    .lock(|m| *m = latest_measurements);
-                if let Some((current_measurement_millis, pressure)) = surface_flash_log {
-                    cx.shared.flash.lock(|flash| {
-                        modes::surface::log_data_flash(
-                            current_measurement_millis,
-                            pressure,
-                            &latest_measurements,
-                            flash,
-                            cx.local.surface_mode_state,
-                        );
-                    });
-                }
-
-                match surface_exit {
-                    Some(SurfaceModeExit::Dive(surface_pressure)) => {
-                        *cx.local.mode_surface_pressure = surface_pressure;
-                        *cx.local.mode = AppMode::Dive;
-                        *cx.local.dive_runtime = Some(cx.shared.flash.lock(|flash| {
-                            modes::dive::setup_dive_mode(
-                                flash,
-                                cx.local.rtc,
-                                surface_pressure,
-                                &GASES,
-                                &GASES_ENABLED,
-                            )
-                        }));
-                        TaskModeTickResult::DirectContinue
-                    }
-                    None => {
-                        sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
-                        TaskModeTickResult::EnterStop2
-                    }
-                }
-            }
-            AppMode::Dive => {
-                #[cfg(feature = "bluetooth")]
-                if BLUETOOTH_MODE_ACTIVE.load(Ordering::Acquire) {
-                    rprintln!("Deactivate Bluetooth");
-                    BLUETOOTH_MODE_ACTIVE.store(false, Ordering::Release);
-                }
-
-                let Some(runtime) = cx.local.dive_runtime.as_mut() else {
-                    transition_into_surface(cx.local.mode, cx.local.surface_mode_state);
-                    sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
-                    let _ = task_mode_tick::spawn();
-                    return TaskModeTickResult::DirectContinue;
-                };
-
-                let (dive_exit, latest_measurements, flash_log) = {
-                    let latest_measurements = cx.shared.latest_measurements.lock(|m| *m);
-                    let (dive_exit, latest_measurements, flash_log) =
-                        modes::dive::run_dive_mode_tick(
-                            runtime,
-                            cx.local.display,
-                            cx.local.ms5849_i2c,
-                            latest_measurements,
-                            &mut cx.local.latest_calculations_state,
-                        )
-                        .await;
-                    (dive_exit, latest_measurements, flash_log)
-                };
-
-                cx.shared
-                    .latest_measurements
-                    .lock(|m| *m = latest_measurements);
-                if let Some(flash_log) = flash_log {
-                    cx.shared.flash.lock(|flash| {
-                        modes::dive::write_flash_log(
-                            runtime,
-                            flash,
-                            flash_log,
-                            &latest_measurements,
-                        );
-                    });
-                }
-
-                if let Some(surface_pressure) = dive_exit {
-                    *cx.local.mode_surface_pressure = surface_pressure;
-                    *cx.local.dive_runtime = None;
-                    transition_into_surface(cx.local.mode, cx.local.surface_mode_state);
-                    TaskModeTickResult::DirectContinue
-                } else {
-                    TaskModeTickResult::Delay(200_u64.millis())
-                }
-            }
-        };
     }
 
     #[task(priority = 1, shared = [latest_measurements], local = [battery_status])]

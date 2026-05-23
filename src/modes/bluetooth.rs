@@ -11,8 +11,8 @@ use stdc_stm32_rs::components::{
 };
 
 use super::{
-    POWER_CUT_UNSAFE_FLASH_WRITE, POWER_CUT_UNSAFE_FW_TRANSFER, is_power_cut_safe, millis_tim5,
-    millis_tim5_since, power_cut_mark_safe, power_cut_mark_unsafe, power_cut_unsafe_mask,
+    POWER_CUT_UNSAFE_FW_TRANSFER, is_power_cut_safe, millis_tim5, millis_tim5_since,
+    power_cut_mark_safe, power_cut_mark_unsafe, power_cut_unsafe_mask,
 };
 
 const BLUETOOTH_MODE_INACTIVITY_TIMEOUT_MILLIS: u32 = 20_000;
@@ -382,10 +382,9 @@ fn handle_command_line(
                 return;
             }
 
-            power_cut_mark_unsafe(POWER_CUT_UNSAFE_FLASH_WRITE);
-            let write_res =
-                write_flash_linear(flash, state.fw_transfer.next_addr, &decoded[..decoded_len]);
-            power_cut_mark_safe(POWER_CUT_UNSAFE_FLASH_WRITE);
+            let write_res = crate::modes::flash_write_and_measure("flash.fw_chunk.write", || {
+                write_flash_linear(flash, state.fw_transfer.next_addr, &decoded[..decoded_len])
+            });
             if write_res.is_err() {
                 send_line(bluetooth, b"ERR FW_WRITE");
                 return;

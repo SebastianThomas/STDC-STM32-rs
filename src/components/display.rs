@@ -26,7 +26,7 @@ pub struct DisplayState {
 pub const ZERO_LOADING_AIR: TissuesLoading<{ setup::NUM_TISSUES }, Pa> =
     TissuesLoading::new(msw(0.0).to_pa(), &AIR);
 
-impl const Default for DisplayState {
+const impl Default for DisplayState {
     fn default() -> Self {
         DisplayState {
             depth: msw(0.0),

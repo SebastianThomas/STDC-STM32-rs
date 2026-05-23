@@ -8,14 +8,63 @@ use stdc_diving_algorithms::{
 };
 
 use crate::{
-    algorithms::rate_algorithm::{DynamicDiffAimdRateAlgorithm, RateAlgorithm},
     algorithms::profile_emulation::EmulatedDiveProfile,
+    algorithms::rate_algorithm::{DynamicDiffAimdRateAlgorithm, RateAlgorithm},
     benchmarking::{self, BenchmarkSample},
     dive_log_host::{
         DecoAlgorithmType, LevelState, LogDiveControlDataBlock, LogPointData, LogPointMetadata,
     },
 };
 
+const DIVE_DECO_UPDATE_MIN_INTERVAL_MILLIS: u32 = 5_000;
+const DIVE_DECO_UPDATE_MAX_INTERVAL_MILLIS: u32 = 30_000;
+const DIVE_DECO_SPEED_REFERENCE_M_PER_S: f32 = 0.30;
+const DIVE_DECO_DEPTH_REFERENCE_M: f32 = 40.0;
+const DIVE_O2TOX_UPDATE_MIN_INTERVAL_MILLIS: u32 = 10_000;
+const DIVE_O2TOX_UPDATE_MAX_INTERVAL_MILLIS: u32 = 120_000;
+const DIVE_O2TOX_DEPTH_REFERENCE_M: f32 = 60.0;
+const DIVE_DISPLAY_REFRESH_INTERVAL_MILLIS: u32 = 250;
+
+fn lerp_u32(min_value: u32, max_value: u32, factor: f32) -> u32 {
+    let factor = factor.clamp(0.0, 1.0);
+    let span = max_value.abs_diff(min_value) as f32;
+    (min_value as f32 + span * factor + 0.5) as u32
+}
+
+fn deco_update_interval_millis(current_depth: Pa, previous_depth: Pa, elapsed_millis: u32) -> u32 {
+    let current_depth_m = current_depth.to_msw().to_f32().max(0.0);
+    let depth_factor = (current_depth_m / DIVE_DECO_DEPTH_REFERENCE_M).clamp(0.0, 1.0);
+    let depth_interval = lerp_u32(
+        DIVE_DECO_UPDATE_MAX_INTERVAL_MILLIS,
+        DIVE_DECO_UPDATE_MIN_INTERVAL_MILLIS,
+        depth_factor,
+    );
+
+    let depth_delta_m = (current_depth.to_msw().to_f32() - previous_depth.to_msw().to_f32()).abs();
+    let elapsed_seconds = (elapsed_millis.max(1) as f32) / 1000.0;
+    let speed_m_per_s = depth_delta_m / elapsed_seconds;
+    let speed_factor = (speed_m_per_s / DIVE_DECO_SPEED_REFERENCE_M_PER_S).clamp(0.0, 1.0);
+    let speed_interval = lerp_u32(
+        DIVE_DECO_UPDATE_MAX_INTERVAL_MILLIS,
+        DIVE_DECO_UPDATE_MIN_INTERVAL_MILLIS,
+        speed_factor,
+    );
+
+    depth_interval.min(speed_interval)
+}
+
+fn o2tox_update_interval_millis(current_depth: Pa) -> u32 {
+    let depth_m = current_depth.to_msw().to_f32().max(0.0);
+    let depth_factor = (depth_m / DIVE_O2TOX_DEPTH_REFERENCE_M).clamp(0.0, 1.0);
+    lerp_u32(
+        DIVE_O2TOX_UPDATE_MAX_INTERVAL_MILLIS,
+        DIVE_O2TOX_UPDATE_MIN_INTERVAL_MILLIS,
+        depth_factor,
+    )
+}
+
+use std::sync::Mutex;
+use std::vec::Vec;
 #[cfg(all(test, not(target_os = "none")))]
 use std::{
     fs::{self, File},
@@ -23,8 +72,6 @@ use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
-use std::sync::Mutex;
-use std::vec::Vec;
 
 static REPORT_PRINT_LOCK: Mutex<()> = Mutex::new(());
 
@@ -45,14 +92,40 @@ fn print_title(title: &str) {
 #[derive(Clone, Copy)]
 struct BenchmarkSampleStats {
     count: usize,
+    sum_cycles: u64,
     min_cycles: u64,
     median_cycles: u64,
     avg_cycles: u64,
     max_cycles: u64,
+    sum_nanos: u64,
     min_nanos: u64,
     median_nanos: u64,
     avg_nanos: u64,
     max_nanos: u64,
+}
+
+#[derive(Clone, Copy)]
+struct DecisionSample {
+    due: bool,
+    skipped_iterations: usize,
+    skipped_seconds: f32,
+}
+
+#[derive(Clone, Copy)]
+struct DecisionSampleStats {
+    count: usize,
+    due_count: usize,
+    not_due_count: usize,
+    sum_skipped_iterations: usize,
+    min_skipped_iterations: usize,
+    median_skipped_iterations: f32,
+    avg_skipped_iterations: f32,
+    max_skipped_iterations: usize,
+    sum_skipped_seconds: f32,
+    min_skipped_seconds: f32,
+    median_skipped_seconds: f32,
+    avg_skipped_seconds: f32,
+    max_skipped_seconds: f32,
 }
 
 fn summarize_samples(samples: &[BenchmarkSample]) -> BenchmarkSampleStats {
@@ -90,10 +163,12 @@ fn summarize_samples(samples: &[BenchmarkSample]) -> BenchmarkSampleStats {
 
     BenchmarkSampleStats {
         count: samples.len(),
+        sum_cycles: total_cycles as u64,
         min_cycles,
         median_cycles: median(&cycles),
         avg_cycles: (total_cycles / samples.len() as u128) as u64,
         max_cycles,
+        sum_nanos: total_nanos as u64,
         min_nanos,
         median_nanos: median(&nanos),
         avg_nanos: (total_nanos / samples.len() as u128) as u64,
@@ -101,18 +176,17 @@ fn summarize_samples(samples: &[BenchmarkSample]) -> BenchmarkSampleStats {
     }
 }
 
-fn stats_row(
-    label: &str,
-    stats: BenchmarkSampleStats,
-) {
+fn stats_row(label: &str, stats: BenchmarkSampleStats) {
     print_row(&format!(
-        "{:<24} | {:<6} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12}",
+        "{:<24} | {:<6} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12}",
         label,
         stats.count,
+        format!("{} cyc", stats.sum_cycles),
         format!("{} cyc", stats.min_cycles),
         format!("{} cyc", stats.median_cycles),
         format!("{} cyc", stats.avg_cycles),
         format!("{} cyc", stats.max_cycles),
+        format!("{} ns", stats.sum_nanos),
         format!("{} ns", stats.min_nanos),
         format!("{} ns", stats.median_nanos),
         format!("{} ns", stats.avg_nanos),
@@ -126,10 +200,12 @@ fn print_sample_stats(label: &str, samples: &[BenchmarkSample]) {
             label,
             BenchmarkSampleStats {
                 count: 0,
+                sum_cycles: 0,
                 min_cycles: 0,
                 median_cycles: 0,
                 avg_cycles: 0,
                 max_cycles: 0,
+                sum_nanos: 0,
                 min_nanos: 0,
                 median_nanos: 0,
                 avg_nanos: 0,
@@ -142,13 +218,205 @@ fn print_sample_stats(label: &str, samples: &[BenchmarkSample]) {
     stats_row(label, summarize_samples(samples));
 }
 
-fn print_single_sample(sample: &BenchmarkSample) {
+fn summarize_decision_samples(samples: &[DecisionSample]) -> DecisionSampleStats {
+    assert!(!samples.is_empty());
+
+    let mut due_skipped_iterations: Vec<usize> = samples
+        .iter()
+        .filter(|sample| sample.due)
+        .map(|sample| sample.skipped_iterations)
+        .collect();
+    let mut due_skipped_seconds: Vec<f32> = samples
+        .iter()
+        .filter(|sample| sample.due)
+        .map(|sample| sample.skipped_seconds)
+        .collect();
+    due_skipped_iterations.sort_unstable();
+    due_skipped_seconds.sort_by(|left, right| left.partial_cmp(right).unwrap());
+
+    let due_count = due_skipped_iterations.len();
+    let not_due_count = samples.len() - due_count;
+
+    let median_usize = |values: &[usize]| -> f32 {
+        if values.is_empty() {
+            return 0.0;
+        }
+        if values.len() % 2 == 0 {
+            let upper = values.len() / 2;
+            let lower = upper - 1;
+            (values[lower] as f32 + values[upper] as f32) / 2.0
+        } else {
+            values[values.len() / 2] as f32
+        }
+    };
+
+    let median_f32 = |values: &[f32]| -> f32 {
+        if values.is_empty() {
+            return 0.0;
+        }
+        if values.len() % 2 == 0 {
+            let upper = values.len() / 2;
+            let lower = upper - 1;
+            (values[lower] + values[upper]) / 2.0
+        } else {
+            values[values.len() / 2]
+        }
+    };
+
+    let mut sum_skipped_iterations = 0usize;
+    let mut sum_skipped_seconds = 0.0f32;
+    let mut min_skipped_iterations = usize::MAX;
+    let mut max_skipped_iterations = 0usize;
+    let mut min_skipped_seconds = f32::INFINITY;
+    let mut max_skipped_seconds = 0.0f32;
+    for sample in samples.iter().filter(|sample| sample.due) {
+        sum_skipped_iterations += sample.skipped_iterations;
+        sum_skipped_seconds += sample.skipped_seconds;
+        min_skipped_iterations = min_skipped_iterations.min(sample.skipped_iterations);
+        max_skipped_iterations = max_skipped_iterations.max(sample.skipped_iterations);
+        min_skipped_seconds = min_skipped_seconds.min(sample.skipped_seconds);
+        max_skipped_seconds = max_skipped_seconds.max(sample.skipped_seconds);
+    }
+
+    if due_count == 0 {
+        min_skipped_iterations = 0;
+        min_skipped_seconds = 0.0;
+    }
+
+    DecisionSampleStats {
+        count: samples.len(),
+        due_count,
+        not_due_count,
+        sum_skipped_iterations,
+        min_skipped_iterations,
+        median_skipped_iterations: median_usize(&due_skipped_iterations),
+        avg_skipped_iterations: if due_count == 0 {
+            0.0
+        } else {
+            sum_skipped_iterations as f32 / due_count as f32
+        },
+        max_skipped_iterations,
+        sum_skipped_seconds,
+        min_skipped_seconds,
+        median_skipped_seconds: median_f32(&due_skipped_seconds),
+        avg_skipped_seconds: if due_count == 0 {
+            0.0
+        } else {
+            sum_skipped_seconds / due_count as f32
+        },
+        max_skipped_seconds,
+    }
+}
+
+fn print_decision_stats(label: &str, stats: DecisionSampleStats) {
     print_row(&format!(
-        "{:<24} | {:<14} | {:<14}",
-        sample.label,
-        format!("{} cyc", sample.cycles),
-        format!("{} ns", sample.nanos)
+        "{:<24} | {:<6} | {:<6} | {:<6} | {:<10} | {:<10} | {:<10} | {:<10} | {:<10} | {:<10} | {:<10} | {:<10} | {:<10} | {:<10}",
+        label,
+        stats.count,
+        stats.due_count,
+        stats.not_due_count,
+        stats.sum_skipped_iterations,
+        stats.min_skipped_iterations,
+        format!("{:.1}", stats.median_skipped_iterations),
+        format!("{:.1}", stats.avg_skipped_iterations),
+        stats.max_skipped_iterations,
+        format!("{:.3}", stats.sum_skipped_seconds),
+        format!("{:.3}", stats.min_skipped_seconds),
+        format!("{:.3}", stats.median_skipped_seconds),
+        format!("{:.3}", stats.avg_skipped_seconds),
+        format!("{:.3}", stats.max_skipped_seconds)
     ));
+}
+
+fn collect_decision_samples<State, IntervalFn, UpdateFn>(
+    measurements: &[DiveMeasurement<Pa>],
+    time_step_ms: u32,
+    mut state: State,
+    mut interval_fn: IntervalFn,
+    mut update_fn: UpdateFn,
+) -> Vec<DecisionSample>
+where
+    IntervalFn: FnMut(&State, &DiveMeasurement<Pa>, u32) -> u32,
+    UpdateFn: FnMut(&mut State, &DiveMeasurement<Pa>),
+{
+    assert!(!measurements.is_empty());
+
+    let mut samples: Vec<DecisionSample> = Vec::with_capacity(measurements.len());
+    let mut last_update_millis = measurements[0].time_ms as u32;
+    let mut last_update_index = 0usize;
+
+    for (index, measurement) in measurements.iter().enumerate() {
+        let elapsed_millis = (measurement.time_ms as u32).wrapping_sub(last_update_millis);
+        let next_interval = interval_fn(&state, measurement, elapsed_millis);
+        let due = elapsed_millis >= next_interval;
+        let skipped_iterations = if due {
+            index.saturating_sub(last_update_index + 1)
+        } else {
+            0
+        };
+        let skipped_seconds = if due {
+            skipped_iterations as f32 * time_step_ms as f32 / 1_000.0
+        } else {
+            0.0
+        };
+
+        samples.push(DecisionSample {
+            due,
+            skipped_iterations,
+            skipped_seconds,
+        });
+
+        if due {
+            last_update_millis = measurement.time_ms as u32;
+            last_update_index = index;
+            update_fn(&mut state, measurement);
+        }
+    }
+
+    samples
+}
+
+fn collect_deco_rate_decision_samples(
+    measurements: &[DiveMeasurement<Pa>],
+    time_step_ms: u32,
+) -> Vec<DecisionSample> {
+    collect_decision_samples(
+        measurements,
+        time_step_ms,
+        measurements[0].depth,
+        |previous_depth, measurement, elapsed_millis| {
+            deco_update_interval_millis(measurement.depth, *previous_depth, elapsed_millis)
+        },
+        |previous_depth, measurement| {
+            *previous_depth = measurement.depth;
+        },
+    )
+}
+
+fn collect_o2_rate_decision_samples(
+    measurements: &[DiveMeasurement<Pa>],
+    time_step_ms: u32,
+) -> Vec<DecisionSample> {
+    collect_decision_samples(
+        measurements,
+        time_step_ms,
+        (),
+        |_, measurement, _| o2tox_update_interval_millis(measurement.depth),
+        |_, _| {},
+    )
+}
+
+fn collect_display_refresh_decision_samples(
+    measurements: &[DiveMeasurement<Pa>],
+    time_step_ms: u32,
+) -> Vec<DecisionSample> {
+    collect_decision_samples(
+        measurements,
+        time_step_ms,
+        (),
+        |_, _, _| DIVE_DISPLAY_REFRESH_INTERVAL_MILLIS,
+        |_, _| {},
+    )
 }
 
 const WINDOW_SIZES: [usize; 5] = [1, 2, 4, 8, 16];
@@ -211,7 +479,8 @@ where
         previous = *measurement;
     }
 
-    let schedule = calc_deco_schedule::<16, NUM_GASES>(&loading, gases, gases_enabled, deco_settings).ok()?;
+    let schedule =
+        calc_deco_schedule::<16, NUM_GASES>(&loading, gases, gases_enabled, deco_settings).ok()?;
     let first_stop = schedule.first_stop()?;
     let hold_time = schedule.get_deco_tts(&get_ascent_rate_per_meter(9));
     let hold_samples = hold_time
@@ -240,13 +509,9 @@ fn generate_deco_aware_profile(
     };
 
     let base = generate_emulated_profile(count, profile, time_step_ms);
-    let Some(overlay) = derive_deco_overlay::<1>(
-        &base,
-        &gases,
-        &gases_enabled,
-        &deco_settings,
-        time_step_ms,
-    ) else {
+    let Some(overlay) =
+        derive_deco_overlay::<1>(&base, &gases, &gases_enabled, &deco_settings, time_step_ms)
+    else {
         return (profile, base);
     };
 
@@ -261,11 +526,22 @@ fn export_benchmark_run(
     profile: EmulatedDiveProfile,
     time_step_ms: u32,
     measurements: &[DiveMeasurement<Pa>],
-    window_reports: &[(usize, Vec<BenchmarkSample>, Vec<BenchmarkSample>, Vec<BenchmarkSample>)],
-    rate_sample: &BenchmarkSample,
-    o2_sample: &BenchmarkSample,
-    control_sample: &BenchmarkSample,
-    point_sample: &BenchmarkSample,
+    window_reports: &[(
+        usize,
+        Vec<BenchmarkSample>,
+        Vec<BenchmarkSample>,
+        Vec<BenchmarkSample>,
+    )],
+    rate_samples: &[BenchmarkSample],
+    deco_rate_samples: &[BenchmarkSample],
+    deco_rate_decision_samples: &[DecisionSample],
+    display_refresh_rate_samples: &[BenchmarkSample],
+    display_refresh_decision_samples: &[DecisionSample],
+    o2_samples: &[BenchmarkSample],
+    o2_rate_samples: &[BenchmarkSample],
+    o2_rate_decision_samples: &[DecisionSample],
+    control_samples: &[BenchmarkSample],
+    point_samples: &[BenchmarkSample],
 ) -> io::Result<PathBuf> {
     let run_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -277,8 +553,14 @@ fn export_benchmark_run(
     fs::create_dir_all(&base_dir)?;
 
     let mut profile_csv = File::create(base_dir.join("profile.csv"))?;
-    writeln!(profile_csv, "# profile.csv records the realized emulated dive profile used for this benchmark run.")?;
-    writeln!(profile_csv, "# sample_index is the zero-based sample number, time_ms is the simulated timestamp, stage is the dive phase, and depth_* is the measured depth at that sample.")?;
+    writeln!(
+        profile_csv,
+        "# profile.csv records the realized emulated dive profile used for this benchmark run."
+    )?;
+    writeln!(
+        profile_csv,
+        "# sample_index is the zero-based sample number, time_ms is the simulated timestamp, stage is the dive phase, and depth_* is the measured depth at that sample."
+    )?;
     writeln!(profile_csv, "sample_index,time_ms,stage,depth_pa,depth_msw")?;
     for (index, measurement) in measurements.iter().enumerate() {
         let point = profile.point_at(101_325.0, time_step_ms, index);
@@ -294,35 +576,54 @@ fn export_benchmark_run(
     }
 
     let mut summary_csv = File::create(base_dir.join("summary.csv"))?;
-    writeln!(summary_csv, "# summary.csv aggregates benchmark timing samples for the run.")?;
-    writeln!(summary_csv, "# section identifies the kind of record: window for per-window batches or single for one-off measurements.")?;
-    writeln!(summary_csv, "# label names the benchmarked operation or sub-metric within that section.")?;
-    writeln!(summary_csv, "# window labels: loading.window, deco.window.<window_size>, rate.window.<window_size>. single labels: rate.algorithm, o2.tox, log.control.serialize, log.point.serialize.")?;
-    writeln!(summary_csv, "# loading.window and rate.* are the executed runtime algorithms, deco.window.* is the deco scheduling calculation, and o2.tox / log.* are support calculations.")?;
-    writeln!(summary_csv, "# total is an overall aggregate across every timing sample written for the run.")?;
     writeln!(
         summary_csv,
-        "section,label,count,min_cycles,median_cycles,avg_cycles,max_cycles,min_ns,median_ns,avg_ns,max_ns"
+        "# summary.csv aggregates benchmark timing samples for the run."
     )?;
-
-    let mut total_samples: Vec<BenchmarkSample> = Vec::new();
+    writeln!(
+        summary_csv,
+        "# section identifies the kind of record: window for per-window batches or single for one-off measurements."
+    )?;
+    writeln!(
+        summary_csv,
+        "# label names the benchmarked operation or sub-metric within that section."
+    )?;
+    writeln!(
+        summary_csv,
+        "# window labels: loading.window, deco.window.<window_size>, flash.log.rate.window.<window_size>. single labels: flash.log.rate, deco.schedule.rate, o2.tox, o2.tox.rate, log.control.serialize, log.point.serialize."
+    )?;
+    writeln!(
+        summary_csv,
+        "# loading.window and rate.* are the executed runtime algorithms, deco.window.* is the deco scheduling calculation, deco.schedule.rate and o2.tox.rate are the dynamic interval algorithms, and o2.tox / log.* are support calculations."
+    )?;
+    writeln!(
+        summary_csv,
+        "# the single rows summarize per-invocation measurements for each replayed call, so their count, sum, min, median, avg, and max reflect the underlying distribution."
+    )?;
+    writeln!(
+        summary_csv,
+        "# the decision rows track whether a scheduler triggered a run or skipped it, plus how many replay iterations and seconds were skipped before each run."
+    )?;
+    writeln!(
+        summary_csv,
+        "section,label,count,sum_cycles,min_cycles,median_cycles,avg_cycles,max_cycles,sum_ns,min_ns,median_ns,avg_ns,max_ns"
+    )?;
 
     for (window_size, loading_samples, deco_samples, rate_samples) in window_reports {
         let loading_stats = summarize_samples(loading_samples);
         let deco_stats = summarize_samples(deco_samples);
         let rate_stats = summarize_samples(rate_samples);
-        total_samples.extend_from_slice(loading_samples);
-        total_samples.extend_from_slice(deco_samples);
-        total_samples.extend_from_slice(rate_samples);
         writeln!(
             summary_csv,
-            "window,{},{},{},{},{},{},{},{},{},{}",
+            "window,{},{},{},{},{},{},{},{},{},{},{},{}",
             window_size,
             loading_stats.count,
+            loading_stats.sum_cycles,
             loading_stats.min_cycles,
             loading_stats.median_cycles,
             loading_stats.avg_cycles,
             loading_stats.max_cycles,
+            loading_stats.sum_nanos,
             loading_stats.min_nanos,
             loading_stats.median_nanos,
             loading_stats.avg_nanos,
@@ -330,13 +631,15 @@ fn export_benchmark_run(
         )?;
         writeln!(
             summary_csv,
-            "window,{},{},{},{},{},{},{},{},{},{}",
+            "window,{},{},{},{},{},{},{},{},{},{},{},{}",
             format!("deco.window.{window_size}"),
             deco_stats.count,
+            deco_stats.sum_cycles,
             deco_stats.min_cycles,
             deco_stats.median_cycles,
             deco_stats.avg_cycles,
             deco_stats.max_cycles,
+            deco_stats.sum_nanos,
             deco_stats.min_nanos,
             deco_stats.median_nanos,
             deco_stats.avg_nanos,
@@ -344,13 +647,15 @@ fn export_benchmark_run(
         )?;
         writeln!(
             summary_csv,
-            "window,{},{},{},{},{},{},{},{},{},{}",
+            "window,{},{},{},{},{},{},{},{},{},{},{},{}",
             format!("rate.window.{window_size}"),
             rate_stats.count,
+            rate_stats.sum_cycles,
             rate_stats.min_cycles,
             rate_stats.median_cycles,
             rate_stats.avg_cycles,
             rate_stats.max_cycles,
+            rate_stats.sum_nanos,
             rate_stats.min_nanos,
             rate_stats.median_nanos,
             rate_stats.avg_nanos,
@@ -358,44 +663,118 @@ fn export_benchmark_run(
         )?;
     }
 
-    let single_samples = [rate_sample, o2_sample, control_sample, point_sample];
-    let single_labels = [
-        "rate.algorithm",
-        "o2.tox",
-        "log.control.serialize",
-        "log.point.serialize",
-    ];
-    for (label, sample) in single_labels.iter().zip(single_samples) {
-        total_samples.push(*sample);
-        writeln!(
-            summary_csv,
-            "single,{},{},{},{},{},{},{},{},{},{}",
-            label,
-            1,
-            sample.cycles,
-            sample.cycles,
-            sample.cycles,
-            sample.cycles,
-            sample.nanos,
-            sample.nanos,
-            sample.nanos,
-            sample.nanos,
-        )?;
-    }
-
-    let total_stats = summarize_samples(&total_samples);
+    // single measurements: explicit to include display.refresh.rate
+    let stats = summarize_samples(rate_samples);
     writeln!(
         summary_csv,
-        "total,all,{},{},{},{},{},{},{},{},{}",
-        total_stats.count,
-        total_stats.min_cycles,
-        total_stats.median_cycles,
-        total_stats.avg_cycles,
-        total_stats.max_cycles,
-        total_stats.min_nanos,
-        total_stats.median_nanos,
-        total_stats.avg_nanos,
-        total_stats.max_nanos,
+        "single,rate.algorithm,{},{},{},{},{},{},{},{},{},{},{}",
+        stats.count,
+        stats.sum_cycles,
+        stats.min_cycles,
+        stats.median_cycles,
+        stats.avg_cycles,
+        stats.max_cycles,
+        stats.sum_nanos,
+        stats.min_nanos,
+        stats.median_nanos,
+        stats.avg_nanos,
+        stats.max_nanos
+    )?;
+    let stats = summarize_samples(deco_rate_samples);
+    writeln!(
+        summary_csv,
+        "single,deco.schedule.rate,{},{},{},{},{},{},{},{},{},{},{}",
+        stats.count,
+        stats.sum_cycles,
+        stats.min_cycles,
+        stats.median_cycles,
+        stats.avg_cycles,
+        stats.max_cycles,
+        stats.sum_nanos,
+        stats.min_nanos,
+        stats.median_nanos,
+        stats.avg_nanos,
+        stats.max_nanos
+    )?;
+    let stats = summarize_samples(o2_samples);
+    writeln!(
+        summary_csv,
+        "single,o2.tox,{},{},{},{},{},{},{},{},{},{},{}",
+        stats.count,
+        stats.sum_cycles,
+        stats.min_cycles,
+        stats.median_cycles,
+        stats.avg_cycles,
+        stats.max_cycles,
+        stats.sum_nanos,
+        stats.min_nanos,
+        stats.median_nanos,
+        stats.avg_nanos,
+        stats.max_nanos
+    )?;
+    let stats = summarize_samples(o2_rate_samples);
+    writeln!(
+        summary_csv,
+        "single,o2.tox.rate,{},{},{},{},{},{},{},{},{},{},{}",
+        stats.count,
+        stats.sum_cycles,
+        stats.min_cycles,
+        stats.median_cycles,
+        stats.avg_cycles,
+        stats.max_cycles,
+        stats.sum_nanos,
+        stats.min_nanos,
+        stats.median_nanos,
+        stats.avg_nanos,
+        stats.max_nanos
+    )?;
+    let stats = summarize_samples(display_refresh_rate_samples);
+    writeln!(
+        summary_csv,
+        "single,display.refresh.rate,{},{},{},{},{},{},{},{},{},{},{}",
+        stats.count,
+        stats.sum_cycles,
+        stats.min_cycles,
+        stats.median_cycles,
+        stats.avg_cycles,
+        stats.max_cycles,
+        stats.sum_nanos,
+        stats.min_nanos,
+        stats.median_nanos,
+        stats.avg_nanos,
+        stats.max_nanos
+    )?;
+    let stats = summarize_samples(control_samples);
+    writeln!(
+        summary_csv,
+        "single,log.control.serialize,{},{},{},{},{},{},{},{},{},{},{}",
+        stats.count,
+        stats.sum_cycles,
+        stats.min_cycles,
+        stats.median_cycles,
+        stats.avg_cycles,
+        stats.max_cycles,
+        stats.sum_nanos,
+        stats.min_nanos,
+        stats.median_nanos,
+        stats.avg_nanos,
+        stats.max_nanos
+    )?;
+    let stats = summarize_samples(point_samples);
+    writeln!(
+        summary_csv,
+        "single,log.point.serialize,{},{},{},{},{},{},{},{},{},{},{}",
+        stats.count,
+        stats.sum_cycles,
+        stats.min_cycles,
+        stats.median_cycles,
+        stats.avg_cycles,
+        stats.max_cycles,
+        stats.sum_nanos,
+        stats.min_nanos,
+        stats.median_nanos,
+        stats.avg_nanos,
+        stats.max_nanos
     )?;
 
     let mut manifest = File::create(base_dir.join("manifest.txt"))?;
@@ -403,6 +782,47 @@ fn export_benchmark_run(
     writeln!(manifest, "profile_cycle_length={}", profile.cycle_length())?;
     writeln!(manifest, "measurements={}", measurements.len())?;
     writeln!(manifest, "time_step_ms={}", time_step_ms)?;
+
+    let mut decision_csv = File::create(base_dir.join("decision.csv"))?;
+    writeln!(
+        decision_csv,
+        "# decision.csv summarizes scheduler decisions for the replayed benchmark run."
+    )?;
+    writeln!(
+        decision_csv,
+        "# label names the scheduler and the counts/intervals describe due versus skipped replay iterations."
+    )?;
+    writeln!(
+        decision_csv,
+        "label,count,due_count,not_due_count,sum_skipped_iterations,min_skipped_iterations,median_skipped_iterations,avg_skipped_iterations,max_skipped_iterations,sum_skipped_seconds,min_skipped_seconds,median_skipped_seconds,avg_skipped_seconds,max_skipped_seconds"
+    )?;
+    let decision_labels = ["deco.schedule.rate", "o2.tox.rate", "display.refresh.rate"];
+    let decision_samples = [
+        deco_rate_decision_samples,
+        o2_rate_decision_samples,
+        display_refresh_decision_samples,
+    ];
+    for (label, samples) in decision_labels.iter().zip(decision_samples) {
+        let stats = summarize_decision_samples(samples);
+        writeln!(
+            decision_csv,
+            "{},{},{},{},{},{},{:.1},{:.1},{},{:.3},{:.3},{:.3},{:.3},{:.3}",
+            label,
+            stats.count,
+            stats.due_count,
+            stats.not_due_count,
+            stats.sum_skipped_iterations,
+            stats.min_skipped_iterations,
+            stats.median_skipped_iterations,
+            stats.avg_skipped_iterations,
+            stats.max_skipped_iterations,
+            stats.sum_skipped_seconds,
+            stats.min_skipped_seconds,
+            stats.median_skipped_seconds,
+            stats.avg_skipped_seconds,
+            stats.max_skipped_seconds,
+        )?;
+    }
 
     Ok(base_dir)
 }
@@ -431,7 +851,12 @@ fn benchmark_dive_profile(
         max_deco_po2: Bar::new(1.6).to_pa(),
     };
 
-    let mut window_reports: Vec<(usize, Vec<BenchmarkSample>, Vec<BenchmarkSample>, Vec<BenchmarkSample>)> = Vec::new();
+    let mut window_reports: Vec<(
+        usize,
+        Vec<BenchmarkSample>,
+        Vec<BenchmarkSample>,
+        Vec<BenchmarkSample>,
+    )> = Vec::new();
     for window_size in WINDOW_SIZES {
         let mut loading = TissuesLoading::<NUM_TISSUES, Pa>::new(surface, &AIR);
         let mut window_rate = DynamicDiffAimdRateAlgorithm::<Pa>::new::<3, 4>(
@@ -469,7 +894,7 @@ fn benchmark_dive_profile(
             });
             deco_samples.push(deco_sample);
 
-            let ((), rate_window_sample) = benchmarking::measure("rate.algorithm.window", || {
+            let ((), rate_window_sample) = benchmarking::measure("flash.log.rate.window", || {
                 for measurement in &measurements[window_start..window_end] {
                     let _ = window_rate.next_iter(current_for_rate, measurement.depth);
                     current_for_rate = measurement.depth;
@@ -504,6 +929,7 @@ fn benchmark_dive_profile(
 
     assert_eq!(window_reports.len(), WINDOW_SIZES.len());
 
+    let mut rate_algorithm_samples: Vec<BenchmarkSample> = Vec::new();
     let mut flash_rate = DynamicDiffAimdRateAlgorithm::<Pa>::new::<3, 4>(
         5_000,
         20_000,
@@ -511,28 +937,70 @@ fn benchmark_dive_profile(
         Bar::new(1.0).to_pa(),
         Bar::new(0.2).to_pa(),
     );
-    let (_, rate_sample) = benchmarking::measure("rate.algorithm", || {
-        let mut current = surface;
-        for measurement in measurements {
-            let _ = flash_rate.next_iter(current, measurement.depth);
-            current = measurement.depth;
-        }
-    });
+    let mut current = surface;
+    for measurement in measurements {
+        let (_, sample) = benchmarking::measure("flash.log.rate", || {
+            flash_rate.next_iter(current, measurement.depth)
+        });
+        rate_algorithm_samples.push(sample);
+        current = measurement.depth;
+    }
 
-    let (_, o2_sample) = benchmarking::measure("o2.tox", || {
-        calculate_toxicity_diff(
-            &[DiveMeasurement {
-                time_ms: 0,
-                depth: surface,
-                gas: 0,
-            }],
-            &gases,
-            1,
-            &O2ToxicityPercentage::new(0.0, 0.0),
-            &O2ExposureType::Single,
-            O2ToxCalculation::RevisedDHM2025,
-        )
-    });
+    let mut deco_rate_samples: Vec<BenchmarkSample> = Vec::new();
+    let mut previous = measurements[0];
+    for measurement in measurements {
+        let delta_ms = measurement.time_ms.saturating_sub(previous.time_ms);
+        let delta_ms = if delta_ms > u16::MAX as usize {
+            u16::MAX
+        } else {
+            delta_ms as u16
+        };
+        let (_, sample) = benchmarking::measure("deco.schedule.rate", || {
+            deco_update_interval_millis(measurement.depth, previous.depth, delta_ms as u32)
+        });
+        deco_rate_samples.push(sample);
+        previous = *measurement;
+    }
+
+    let mut o2_tox_samples: Vec<BenchmarkSample> = Vec::new();
+    let mut o2_rate_samples: Vec<BenchmarkSample> = Vec::new();
+    for measurement in measurements {
+        let (_, tox_sample) = benchmarking::measure("o2.tox", || {
+            calculate_toxicity_diff(
+                &[DiveMeasurement {
+                    time_ms: 0,
+                    depth: surface,
+                    gas: 0,
+                }],
+                &gases,
+                1,
+                &O2ToxicityPercentage::new(0.0, 0.0),
+                &O2ExposureType::Single,
+                O2ToxCalculation::RevisedDHM2025,
+            )
+        });
+        o2_tox_samples.push(tox_sample);
+
+        let (_, rate_sample) = benchmarking::measure("o2.tox.rate", || {
+            o2tox_update_interval_millis(measurement.depth)
+        });
+        o2_rate_samples.push(rate_sample);
+    }
+
+    let display_refresh_rate_samples: Vec<BenchmarkSample> = measurements
+        .iter()
+        .map(|_| {
+            benchmarking::measure("display.refresh.rate", || {
+                DIVE_DISPLAY_REFRESH_INTERVAL_MILLIS
+            })
+            .1
+        })
+        .collect();
+
+    let deco_rate_decision_samples = collect_deco_rate_decision_samples(measurements, time_step_ms);
+    let o2_rate_decision_samples = collect_o2_rate_decision_samples(measurements, time_step_ms);
+    let display_refresh_decision_samples =
+        collect_display_refresh_decision_samples(measurements, time_step_ms);
 
     let control_block = LogDiveControlDataBlock::<1>::new(
         1_700_000_000,
@@ -568,14 +1036,21 @@ fn benchmark_dive_profile(
             time_step_ms,
             measurements,
             &window_reports,
-            &rate_sample,
-            &o2_sample,
-            &control_sample,
-            &point_sample,
+            &rate_algorithm_samples,
+            &deco_rate_samples,
+            &deco_rate_decision_samples,
+            &display_refresh_rate_samples,
+            &display_refresh_decision_samples,
+            &o2_tox_samples,
+            &o2_rate_samples,
+            &o2_rate_decision_samples,
+            std::slice::from_ref(&control_sample),
+            std::slice::from_ref(&point_sample),
         )
         .expect("export benchmark artifacts");
         assert!(export_dir.join("profile.csv").exists());
         assert!(export_dir.join("summary.csv").exists());
+        assert!(export_dir.join("decision.csv").exists());
         assert!(export_dir.join("manifest.txt").exists());
     }
 
@@ -586,24 +1061,83 @@ fn benchmark_dive_profile(
         print_row(&format!("window_size={} measurements={}", window_size, n));
         print_rule();
         print_row(&format!(
-            "{:<24} | {:<6} | {:<12} | {:<12} | {:<12} | {:<12}",
-            "window metric", "count", "min", "median", "avg", "max"
+            "{:<24} | {:<6} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12}",
+            "window metric",
+            "count",
+            "sum",
+            "min",
+            "median",
+            "avg",
+            "max",
+            "sum",
+            "min",
+            "median",
+            "avg",
+            "max"
         ));
         print_rule();
         print_sample_stats("loading.window", loading_samples);
         print_sample_stats("deco.schedule.window", deco_samples);
-        print_sample_stats("rate.algorithm.window", rate_samples);
+        print_sample_stats("flash.log.rate.window", rate_samples);
         print_rule();
     }
     print_row(&format!(
-        "{:<24} | {:<14} | {:<14}",
-        "single metric", "cycles", "time"
+        "{:<24} | {:<6} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12} | {:<12}",
+        "single metric",
+        "count",
+        "sum",
+        "min",
+        "median",
+        "avg",
+        "max",
+        "sum",
+        "min",
+        "median",
+        "avg",
+        "max"
     ));
     print_rule();
-    print_single_sample(&rate_sample);
-    print_single_sample(&o2_sample);
-    print_single_sample(&control_sample);
-    print_single_sample(&point_sample);
+    print_sample_stats("flash.log.rate", &rate_algorithm_samples);
+    print_sample_stats("deco.schedule.rate", &deco_rate_samples);
+    print_sample_stats("o2.tox", &o2_tox_samples);
+    print_sample_stats("o2.tox.rate", &o2_rate_samples);
+    print_sample_stats("display.refresh.rate", &display_refresh_rate_samples);
+    print_sample_stats(
+        "log.control.serialize",
+        std::slice::from_ref(&control_sample),
+    );
+    print_sample_stats("log.point.serialize", std::slice::from_ref(&point_sample));
+    print_rule();
+    print_row(&format!(
+        "{:<24} | {:<6} | {:<6} | {:<6} | {:<10} | {:<10} | {:<10} | {:<10} | {:<10} | {:<10} | {:<10} | {:<10} | {:<10} | {:<10}",
+        "decision metric",
+        "count",
+        "due",
+        "skip",
+        "sum_it",
+        "min_it",
+        "med_it",
+        "avg_it",
+        "max_it",
+        "sum_s",
+        "min_s",
+        "med_s",
+        "avg_s",
+        "max_s"
+    ));
+    print_rule();
+    print_decision_stats(
+        "deco.schedule.rate",
+        summarize_decision_samples(&deco_rate_decision_samples),
+    );
+    print_decision_stats(
+        "o2.tox.rate",
+        summarize_decision_samples(&o2_rate_decision_samples),
+    );
+    print_decision_stats(
+        "display.refresh.rate",
+        summarize_decision_samples(&display_refresh_decision_samples),
+    );
     print_rule();
     print_row(&format!(
         "measurements={} window_sizes={:?} min_count={}",

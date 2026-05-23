@@ -267,6 +267,7 @@ pub struct LatestO2CalculationsState {
     pub o2_tox_daily: O2ToxicityPercentage,
     pub measurements_since_o2_calc: [DiveMeasurement<Pa>; MEASUREMENT_BUFFER_SIZE],
     pub nr_measurements_since_o2_calc: usize,
+    pub next_o2_tox_update_millis: u32,
 }
 
 impl<const NUM_TISSUES: usize, P: const AbsPressure> LatestCalculationsState<NUM_TISSUES, P> {
@@ -281,6 +282,7 @@ impl<const NUM_TISSUES: usize, P: const AbsPressure> LatestCalculationsState<NUM
                     gas: usize::MAX,
                 }; MEASUREMENT_BUFFER_SIZE],
                 nr_measurements_since_o2_calc: 0,
+                next_o2_tox_update_millis: 0,
             },
             tissue_loadings: TissuesLoading::new(ambient, &gas::AIR),
         }

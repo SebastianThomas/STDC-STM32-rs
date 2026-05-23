@@ -88,3 +88,27 @@ pub fn power_cut_unsafe_mask() -> u8 {
 pub fn is_power_cut_safe() -> bool {
     power_cut_unsafe_mask() == 0
 }
+
+/// Helper to perform a flash write.
+/// - Mark the device unsafe for power-cut,
+/// - Measuring the operation with the benchmarking harness, and logg the sample.
+///
+/// * `op`` closure should perform the actual flash operation
+pub fn flash_write_and_measure<T, FOp>(label: &'static str, op: FOp) -> T
+where
+    FOp: FnOnce() -> T,
+{
+    with_power_cut_unsafe_measure_and_log(POWER_CUT_UNSAFE_FLASH_WRITE, label, op)
+}
+
+/// Generic helper to mark a given `flag` unsafe for power-cut, measure and log the operation,
+/// then mark the flag safe again.
+pub fn with_power_cut_unsafe_measure_and_log<T, FOp>(flag: u8, label: &'static str, op: FOp) -> T
+where
+    FOp: FnOnce() -> T,
+{
+    power_cut_mark_unsafe(flag);
+    let res = crate::benchmarking::measure_and_log(label, op);
+    power_cut_mark_safe(flag);
+    res
+}

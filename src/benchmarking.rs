@@ -138,11 +138,21 @@ where
 #[cfg(all(target_os = "none", feature = "online_benchmarking"))]
 pub fn log_sample(sample: &BenchmarkSample) {
     rtt_target::rprintln!(
-        "bench {} cycles={} nanos={}",
+        "bench_sample,label={},cycles={},nanos={}",
         sample.label,
         sample.cycles,
         sample.nanos
     );
+}
+
+#[cfg(all(target_os = "none", feature = "online_benchmarking"))]
+pub fn log_session_start(session_name: &'static str) {
+    rtt_target::rprintln!("bench_session,name={}", session_name);
+}
+
+#[cfg(all(target_os = "none", feature = "online_benchmarking"))]
+pub fn log_schema(schema_name: &'static str) {
+    rtt_target::rprintln!("bench_schema,name={}", schema_name);
 }
 
 #[cfg(all(target_os = "none", not(feature = "online_benchmarking")))]
@@ -151,13 +161,29 @@ pub fn log_sample(_sample: &BenchmarkSample) {}
 #[cfg(all(not(target_os = "none"), test))]
 pub fn log_sample(sample: &BenchmarkSample) {
     println!(
-        "bench {} cycles={} nanos={}",
+        "bench_sample,label={},cycles={},nanos={}",
         sample.label, sample.cycles, sample.nanos
     );
 }
 
+#[cfg(all(not(target_os = "none"), test))]
+pub fn log_session_start(session_name: &'static str) {
+    println!("bench_session,name={}", session_name);
+}
+
+#[cfg(all(not(target_os = "none"), test))]
+pub fn log_schema(schema_name: &'static str) {
+    println!("bench_schema,name={}", schema_name);
+}
+
 #[cfg(all(not(target_os = "none"), not(test)))]
 pub fn log_sample(_sample: &BenchmarkSample) {}
+
+#[cfg(all(not(target_os = "none"), not(test)))]
+pub fn log_session_start(_session_name: &'static str) {}
+
+#[cfg(all(not(target_os = "none"), not(test)))]
+pub fn log_schema(_schema_name: &'static str) {}
 
 #[cfg(all(target_os = "none", feature = "online_benchmarking"))]
 pub fn wfi_count() -> u64 {
@@ -184,6 +210,59 @@ pub fn log_samples(samples: &[BenchmarkSample]) {
         log_sample(sample);
     }
 }
+
+/// Measure the given closure and immediately log the resulting sample.
+/// Returns the closure's result.
+pub fn measure_and_log<R, F>(label: &'static str, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let (res, sample) = measure(label, f);
+    log_sample(&sample);
+    res
+}
+
+/// Async variant: measure the future, log the sample, and return the result.
+pub async fn measure_async_and_log<R, F>(label: &'static str, fut: F) -> R
+where
+    F: Future<Output = R>,
+{
+    let (res, sample) = measure_async(label, fut).await;
+    log_sample(&sample);
+    res
+}
+
+#[cfg(all(target_os = "none", feature = "online_benchmarking"))]
+pub fn log_decision(label: &'static str, due: bool, skipped_ms: Option<u32>) {
+    if due {
+        rtt_target::rprintln!("bench_decision,label={},due=true", label);
+    } else {
+        rtt_target::rprintln!(
+            "bench_decision,label={},due=false,skipped_ms={}",
+            label,
+            skipped_ms.unwrap_or(0)
+        );
+    }
+}
+
+#[cfg(all(not(target_os = "none"), test))]
+pub fn log_decision(label: &'static str, due: bool, skipped_ms: Option<u32>) {
+    if due {
+        println!("bench_decision,label={},due=true", label);
+    } else {
+        println!(
+            "bench_decision,label={},due=false,skipped_ms={}",
+            label,
+            skipped_ms.unwrap_or(0)
+        );
+    }
+}
+
+#[cfg(all(not(target_os = "none"), not(test)))]
+pub fn log_decision(_label: &'static str, _due: bool, _skipped_ms: Option<u32>) {}
+
+#[cfg(all(target_os = "none", not(feature = "online_benchmarking")))]
+pub fn log_decision(_label: &'static str, _due: bool, _skipped_ms: Option<u32>) {}
 
 pub fn nanos_per_cycle(cycles: u64, clock_hz: u64) -> u64 {
     cycles.saturating_mul(1_000_000_000) / clock_hz

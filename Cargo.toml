@@ -39,5 +39,6 @@ test = false
 default = ["lin_exp", "display"]
 lin_exp = ["stdc_diving_algorithms/lin_exp"]
 online_benchmarking = []
+live_sim = []
 display = []
 bluetooth = []

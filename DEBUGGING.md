@@ -1,6 +1,8 @@
 # Debugging with cargo-embed and GDB
 
-This project is configured to debug with `cargo embed` using `Embed.toml`.
+This project is configured to debug with `cargo embed`, which is part
+of the `probe-rs` project, using and `Embed.toml` specifying the most
+important settings.
 
 For the common workflows, use `just`:
 
@@ -15,10 +17,10 @@ For the common workflows, use `just`:
 ## 1) Start probe-rs session
 
 ```bash
-cargo embed
+just embed
 ```
 
-With the current `Embed.toml`, this will:
+With the given `Embed.toml`, this will:
 
 - build and flash the firmware,
 - reset the target,

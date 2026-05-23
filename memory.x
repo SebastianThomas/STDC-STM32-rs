@@ -1,5 +1,6 @@
 /* Entry Point */
-ENTRY(Reset_Handler)
+/* ENTRY(Reset_Handler) /* Until including Rust 2026-04-28 */
+ENTRY(Reset) /* Since Rust 2026-05-23 */
 
 /* Specify the memory areas */
 MEMORY

@@ -16,10 +16,7 @@ use stdc_stm32_rs::{
 
 use crate::DEFAULT_SURFACE_PRESSURE;
 
-use super::{
-    POWER_CUT_UNSAFE_FLASH_WRITE, SurfaceModeExit, millis_tim5, millis_tim5_since,
-    power_cut_mark_safe, power_cut_mark_unsafe,
-};
+use super::{SurfaceModeExit, millis_tim5, millis_tim5_since};
 
 const SURFACE_POLL_INTERVAL_MILLIS: u32 = 5 * 1000;
 
@@ -176,9 +173,8 @@ pub fn log_data_flash<F: Flash>(
         temperature,
         battery,
     );
-    power_cut_mark_unsafe(POWER_CUT_UNSAFE_FLASH_WRITE);
-    let write_res = data.write(flash);
-    power_cut_mark_safe(POWER_CUT_UNSAFE_FLASH_WRITE);
+    let write_res =
+        crate::modes::flash_write_and_measure("flash.point.write", || data.write(flash));
     match write_res {
         Ok(_) => {
             state.last_logged_millis = current_measurement_millis;

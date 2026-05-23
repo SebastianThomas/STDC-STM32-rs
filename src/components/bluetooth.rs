@@ -80,7 +80,8 @@ where
     pub fn initialize_bluetooth(
         self,
         bluetooth_name: &[u8],
-    ) -> Result<UartBluetoothModule<TX, RX, TXI>, (Error<E>, UartBluetoothModule<TX, RX, TXI>)> {
+    ) -> Result<UartBluetoothModule<TX, RX, TXI>, (Error<E>, UartBluetoothModule<TX, RX, TXI>)>
+    {
         rprintln!("Entering CMD Mode");
         let mut bluetooth = match self.enter_command_mode() {
             Ok(bluetooth) => bluetooth,
@@ -156,7 +157,8 @@ where
     /// Requires a guard time (~86 ms silence on UART) before sending "$$$".
     pub fn enter_command_mode(
         self,
-    ) -> Result<UartBluetoothCommandMode<TX, RX, TXI>, (Error<E>, UartBluetoothModule<TX, RX, TXI>)> {
+    ) -> Result<UartBluetoothCommandMode<TX, RX, TXI>, (Error<E>, UartBluetoothModule<TX, RX, TXI>)>
+    {
         let mut command_mode = UartBluetoothCommandMode {
             uart_tx: self.uart_tx,
             uart_rx: self.uart_rx,
@@ -199,7 +201,8 @@ where
 
     pub fn exit_command_mode(
         self,
-    ) -> Result<UartBluetoothModule<TX, RX, TXI>, (Error<E>, UartBluetoothModule<TX, RX, TXI>)> {
+    ) -> Result<UartBluetoothModule<TX, RX, TXI>, (Error<E>, UartBluetoothModule<TX, RX, TXI>)>
+    {
         let mut normal_mode = UartBluetoothModule {
             uart_tx: self.uart_tx,
             uart_rx: self.uart_rx,

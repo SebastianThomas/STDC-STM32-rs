@@ -9,7 +9,7 @@ pub enum DiveStage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DecoOverlay {
+pub struct EmulationDecoOverlay {
     pub stop_depth_pa: f32,
     pub hold_samples: usize,
 }
@@ -19,7 +19,7 @@ pub struct EmulatedDiveProfile {
     stage_lengths: [usize; 3],
     max_depth_delta_pa: f32,
     bottom_variation: f32,
-    deco_overlay: Option<DecoOverlay>,
+    deco_overlay: Option<EmulationDecoOverlay>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -58,7 +58,7 @@ impl EmulatedDiveProfile {
     }
 
     pub const fn with_deco_overlay(mut self, stop_depth_pa: f32, hold_samples: usize) -> Self {
-        self.deco_overlay = Some(DecoOverlay {
+        self.deco_overlay = Some(EmulationDecoOverlay {
             stop_depth_pa,
             hold_samples,
         });
@@ -71,7 +71,11 @@ impl EmulatedDiveProfile {
     }
 
     pub fn cycle_length(&self) -> usize {
-        self.stage_lengths.iter().sum::<usize>() + self.deco_overlay.map(|overlay| overlay.hold_samples).unwrap_or(0)
+        self.stage_lengths.iter().sum::<usize>()
+            + self
+                .deco_overlay
+                .map(|overlay| overlay.hold_samples)
+                .unwrap_or(0)
     }
 
     fn stage_at(&self, sample_index: usize) -> (DiveStage, f32) {
@@ -80,7 +84,11 @@ impl EmulatedDiveProfile {
 
         let descent_end = self.stage_lengths[0];
         let bottom_end = descent_end + self.stage_lengths[1];
-        let deco_hold_end = bottom_end + self.deco_overlay.map(|overlay| overlay.hold_samples).unwrap_or(0);
+        let deco_hold_end = bottom_end
+            + self
+                .deco_overlay
+                .map(|overlay| overlay.hold_samples)
+                .unwrap_or(0);
 
         if cycle_index < descent_end {
             (
@@ -132,7 +140,12 @@ impl EmulatedDiveProfile {
         }
     }
 
-    pub fn point_at(&self, surface_pa: f32, time_step_ms: u32, sample_index: usize) -> EmulatedDivePoint {
+    pub fn point_at(
+        &self,
+        surface_pa: f32,
+        time_step_ms: u32,
+        sample_index: usize,
+    ) -> EmulatedDivePoint {
         let (stage, _) = self.stage_at(sample_index);
         let depth_pa = self.depth_at(surface_pa, sample_index);
         EmulatedDivePoint {

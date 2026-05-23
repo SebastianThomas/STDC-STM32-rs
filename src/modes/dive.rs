@@ -3,22 +3,26 @@ use core::fmt::Debug;
 use rtt_target::rprintln;
 use stdc_diving_algorithms::{
     deco_algorithm::{DecoSettings, MVALUES, TISSUES},
-    dive::{DiveMeasurement, DiveProfile, get_ascent_rate_per_meter},
+    dive::{DiveMeasurement, DiveProfile},
     gas::{GasDensitySettings, GasMix, MAX_GAS_DENSITY, TissuesLoading},
     loadings_from_dive_profile,
     o2tox::{O2ExposureType, O2ToxCalculation, calculate_toxicity_diff},
     pressure_unit::{Bar, Pa, Pressure, msw},
     setup::NUM_TISSUES,
 };
+
+#[cfg(not(feature = "live_sim"))]
+use stdc_stm32_rs::constants::barometric::DepthOrAltitude;
 use stm32l4xx_hal::{
     hal::blocking::i2c::{Read, Write, WriteRead},
     rtc::Rtc,
 };
 
+#[cfg(feature = "live_sim")]
+use stdc_stm32_rs::algorithms::profile_emulation::EmulatedDiveProfile;
 use stdc_stm32_rs::{
     algorithms::{
         helpers::datetime_to_epoch_seconds,
-        profile_emulation::EmulatedDiveProfile,
         rate_algorithm::{DynamicDiffAimdRateAlgorithm, RateAlgorithm},
     },
     benchmarking,
@@ -32,19 +36,18 @@ use stdc_stm32_rs::{
         spi_utils::DetailsError,
         // uart_log removed from dive mode; use rprintln! instead
     },
-    constants::barometric::DepthOrAltitude,
 };
 
+use super::{display_set_depth, millis_tim5, millis_tim5_since};
 use crate::{
     LatestCalculationsState, LatestMeasurements, MEASUREMENT_BUFFER_SIZE,
     tasks::dive::{
-        DiveTaskState, refresh_display_if_due, update_deco_schedule_if_due, update_dive_time_if_due,
+        DiveTaskState, o2tox_update_interval_millis, refresh_display_if_due,
+        update_deco_schedule_if_due, update_dive_time_if_due,
     },
 };
 
-use super::{POWER_CUT_UNSAFE_FLASH_WRITE, power_cut_mark_safe, power_cut_mark_unsafe};
-use super::{display_set_depth, millis_tim5, millis_tim5_since};
-
+#[cfg(not(feature = "live_sim"))]
 const DIVE_END_TOLERANCE_MILLIS: u32 = 10_000;
 
 #[cfg(feature = "lin_exp")]
@@ -60,7 +63,7 @@ pub struct DiveRuntime<const NR_GASES: usize> {
     gases_enabled: [bool; NR_GASES],
     loading: TissuesLoading<{ NUM_TISSUES }, Pa>,
     current_gas_mode_idx: CurrentDiveModeWithInfo,
-    #[cfg(feature = "online_benchmarking")]
+    #[cfg(feature = "live_sim")]
     emulated_profile: EmulatedDiveProfile,
     last_measurement_millis: u32,
     last_logged_millis: u32,
@@ -115,6 +118,11 @@ where
     let loading = loadings_from_dive_profile(&TISSUES, &dive_profile, &MVALUES, surface_pressure);
     let current_gas_mode_idx = CurrentDiveModeWithInfo::OC { gas_idx: 0 };
 
+    #[cfg(feature = "online_benchmarking")]
+    benchmarking::log_session_start("dive.online_benchmarking.profile.deep");
+    #[cfg(feature = "online_benchmarking")]
+    benchmarking::log_schema("summary.csv");
+
     let (start_date, start_time) = rtc.get_date_time();
     let start_epoch_seconds = datetime_to_epoch_seconds(start_date, start_time);
     let surface_interval_seconds = 0;
@@ -133,9 +141,9 @@ where
         DECO_ALGORITHM_TYPE,
     );
 
-    power_cut_mark_unsafe(POWER_CUT_UNSAFE_FLASH_WRITE);
-    let dive_control_write = dive_control_data_block.write(flash);
-    power_cut_mark_safe(POWER_CUT_UNSAFE_FLASH_WRITE);
+    let dive_control_write = crate::modes::flash_write_and_measure("flash.control.write", || {
+        dive_control_data_block.write(flash)
+    });
     if let Err(e) = dive_control_write {
         rprintln!("Failed writing dive control data block.");
         rprintln!("Flash error details: {:?}", e.details());
@@ -149,7 +157,7 @@ where
         gases_enabled: *gases_enabled,
         loading,
         current_gas_mode_idx,
-        #[cfg(feature = "online_benchmarking")]
+        #[cfg(feature = "live_sim")]
         emulated_profile: EmulatedDiveProfile::deep(),
         last_measurement_millis: dive_start_millis,
         last_logged_millis: dive_start_millis,
@@ -163,7 +171,7 @@ where
             Bar::new(1.0).to_pa(),
             Bar::new(0.2).to_pa(),
         ),
-        task_state: DiveTaskState::new(dive_start_millis),
+        task_state: DiveTaskState::new(dive_start_millis, surface_pressure.to_msw()),
     }
 }
 
@@ -193,13 +201,15 @@ where
     let _ = update_dive_time_if_due(&mut runtime.task_state, runtime.dive_start_millis);
 
     let measurement_millis = millis_tim5();
-    #[cfg(not(feature = "online_benchmarking"))]
+
     ms5849_i2c.read_i2c().await;
     let temperature_c = ms5849_i2c.temperature();
-    let mut latest_measurements = latest_measurements;
-    let mut flash_log: Option<DiveFlashLog> = None;
 
-    #[cfg(feature = "online_benchmarking")]
+    let mut latest_measurements = latest_measurements;
+
+    let flash_log: Option<DiveFlashLog>;
+
+    #[cfg(feature = "live_sim")]
     {
         let emulated_sample_index = (current_millis / 1_000) as usize;
         let emulated_point = runtime.emulated_profile.point_at(
@@ -214,7 +224,7 @@ where
         latest_measurements = latest_measurements.record_environment(
             pressure,
             Some(depth),
-            None,
+            temperature_c,
             measurement_millis,
         );
         handle_depth_measurement(
@@ -228,6 +238,15 @@ where
             &runtime.gases,
             &runtime.gases_enabled,
             &runtime.current_gas_mode_idx,
+        );
+        let deco_overlay = update_deco_schedule_if_due(
+            &mut runtime.task_state,
+            depth,
+            measurement_millis,
+            &runtime.loading,
+            &runtime.gases,
+            &runtime.gases_enabled,
+            &runtime.deco_settings,
         );
         flash_log = flash_log_tick_plan(
             &mut runtime.flash_log_algorithm,
@@ -243,29 +262,18 @@ where
             &latest_measurements,
         );
 
-        if let Ok(schedule) = calc_deco_schedule::<16, NUM_GASES>(
-            &runtime.loading,
-            &runtime.gases,
-            &runtime.gases_enabled,
-            &runtime.deco_settings,
-        ) {
-            if let Some(first_stop) = schedule.first_stop() {
-                let hold_time = schedule.get_deco_tts(&get_ascent_rate_per_meter(9));
-                let hold_samples = hold_time
-                    .as_millis()
-                    .saturating_add(999)
-                    .div_euclid(1_000) as usize;
-                runtime.emulated_profile = runtime.emulated_profile.with_deco_overlay(
-                    first_stop.depth().to_pa().to_f32(),
-                    hold_samples.max(1),
-                );
-            } else {
+        if let Some(overlay) = deco_overlay {
+            if overlay.hold_samples == 0 {
                 runtime.emulated_profile = runtime.emulated_profile.without_deco_overlay();
+            } else {
+                runtime.emulated_profile = runtime
+                    .emulated_profile
+                    .with_deco_overlay(overlay.stop_depth_pa, overlay.hold_samples);
             }
         }
     }
 
-    #[cfg(not(feature = "online_benchmarking"))]
+    #[cfg(not(feature = "live_sim"))]
     match ms5849_i2c.depth_relative_or_altitude(runtime.surface_pressure) {
         Ok(DepthOrAltitude::Depth { pressure, depth }) => {
             runtime.surfaced_since_millis = None;
@@ -286,6 +294,15 @@ where
                 &runtime.gases,
                 &runtime.gases_enabled,
                 &runtime.current_gas_mode_idx,
+            );
+            let _ = update_deco_schedule_if_due(
+                &mut runtime.task_state,
+                depth,
+                measurement_millis,
+                &runtime.loading,
+                &runtime.gases,
+                &runtime.gases_enabled,
+                &runtime.deco_settings,
             );
             flash_log = flash_log_tick_plan(
                 &mut runtime.flash_log_algorithm,
@@ -314,28 +331,19 @@ where
                 altitude
             );
             let start = runtime.surfaced_since_millis.get_or_insert(current_millis);
+            flash_log = None;
             if current_millis.wrapping_sub(*start) > DIVE_END_TOLERANCE_MILLIS {
                 return (Some(pressure), latest_measurements, flash_log);
             }
         }
         Err((pressure, err)) => {
+            flash_log = None;
             rprintln!(
                 "Got error while reading depth for pressure {:?}: {:?}.",
                 pressure,
                 err
             );
         }
-    }
-
-    let completed = update_deco_schedule_if_due(
-        &mut runtime.task_state,
-        &runtime.loading,
-        &runtime.gases,
-        &runtime.gases_enabled,
-        &runtime.deco_settings,
-    );
-    if !completed {
-        rprintln!("Could not complete deco schedule");
     }
 
     let _ = refresh_display_if_due(&mut runtime.task_state, display);
@@ -360,9 +368,8 @@ pub fn write_flash_log<F: Flash, const NUM_GASES: usize>(
         battery,
     );
 
-    power_cut_mark_unsafe(POWER_CUT_UNSAFE_FLASH_WRITE);
-    let write_res = log_point_data.write(flash);
-    power_cut_mark_safe(POWER_CUT_UNSAFE_FLASH_WRITE);
+    let write_res =
+        crate::modes::flash_write_and_measure("flash.point.write", || log_point_data.write(flash));
     match write_res {
         Ok(_) => {
             runtime.last_logged_millis = flash_log.measurement_millis;
@@ -386,7 +393,7 @@ fn handle_depth_measurement<const NR_GASES: usize, const NUM_TISSUES: usize>(
     _gases_enabled: &[bool; NR_GASES],
     current_gas_mode_idx: &CurrentDiveModeWithInfo,
 ) {
-    let (_, sample) = benchmarking::measure("dive.rate_and_logging", || {
+    benchmarking::measure_and_log("dive.rate_and_logging", || {
         rprintln!("Measuring Pressure: {:?}, depth: {:?}", pressure, depth);
         display_set_depth(depth);
 
@@ -405,30 +412,45 @@ fn handle_depth_measurement<const NR_GASES: usize, const NUM_TISSUES: usize>(
         );
         latest_calculations_state.tissue_loadings = loading.clone();
     });
-    benchmarking::log_sample(&sample);
 
-    // TODO: Decompression Algorithm?
+    let current_measurement = DiveMeasurement {
+        time_ms: measurement_millis as usize,
+        depth: pressure,
+        gas: current_gas_mode_idx.to_log_byte() as usize,
+    };
+    latest_calculations_state.o2_tox.measurements_since_o2_calc =
+        [current_measurement; MEASUREMENT_BUFFER_SIZE];
+    latest_calculations_state
+        .o2_tox
+        .nr_measurements_since_o2_calc = 1;
 
-    let (_, sample) = benchmarking::measure("dive.o2_tox", || {
-        let measurements_since_latest = latest_calculations_state.o2_tox.measurements_since_o2_calc;
-        let nr_measurements = latest_calculations_state
-            .o2_tox
-            .nr_measurements_since_o2_calc;
+    let next_o2_tox_update_millis = benchmarking::measure_and_log("dive.o2_tox.rate", || {
+        measurement_millis.saturating_add(o2tox_update_interval_millis(depth))
+    });
+    latest_calculations_state.o2_tox.next_o2_tox_update_millis = next_o2_tox_update_millis;
+
+    if measurement_millis < next_o2_tox_update_millis {
+        #[cfg(feature = "online_benchmarking")]
+        benchmarking::log_decision(
+            "dive.o2_tox.rate",
+            false,
+            Some(next_o2_tox_update_millis - measurement_millis),
+        );
+        return;
+    }
+
+    benchmarking::measure_and_log("dive.o2_tox", || {
         latest_calculations_state.o2_tox.o2_tox_single = calculate_toxicity_diff(
-            &measurements_since_latest[..nr_measurements],
+            &[current_measurement],
             gases,
             1,
             &latest_calculations_state.o2_tox.o2_tox_single,
             &O2ExposureType::Single,
             O2ToxCalculation::RevisedDHM2025,
         );
-        latest_calculations_state.o2_tox.measurements_since_o2_calc =
-            [measurements_since_latest[nr_measurements - 1]; MEASUREMENT_BUFFER_SIZE];
-        latest_calculations_state
-            .o2_tox
-            .nr_measurements_since_o2_calc = 1;
     });
-    benchmarking::log_sample(&sample);
+    #[cfg(feature = "online_benchmarking")]
+    benchmarking::log_decision("dive.o2_tox.rate", true, None);
 }
 
 fn flash_log_tick_plan<R: RateAlgorithm<Pa, Pa, u32>>(

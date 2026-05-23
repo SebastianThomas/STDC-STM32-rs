@@ -650,10 +650,12 @@ mod app {
         rprintln!("RTC wakeup interrupt fired");
     }
 
+    #[allow(unused)]
     enum TaskModeTickResult {
         EnterStop2,
         DirectContinue,
         Delay(Duration<u64, 1, { TIM2_MONO_CLOCK }>),
+        DelayUntil(Duration<u64, 1, { TIM2_MONO_CLOCK }>),
     }
 
     #[task(priority = 1, shared = [latest_measurements, clocks, apb1r1, flash], local = [
@@ -669,6 +671,8 @@ mod app {
     ])]
     async fn task_mode_tick(mut cx: task_mode_tick::Context) {
         loop {
+            let iteration_start = Mono::now();
+            
             modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
             sync_power_cut_indicator();
             sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
@@ -784,7 +788,7 @@ mod app {
                             transition_into_surface(cx.local.mode, cx.local.surface_mode_state);
                             TaskModeTickResult::DirectContinue
                         } else {
-                            TaskModeTickResult::Delay(200_u64.millis())
+                            TaskModeTickResult::DelayUntil(500_u64.millis())
                         }
                     }
                 }
@@ -792,12 +796,16 @@ mod app {
             .await;
             rprintln!("Completed Task Mode Tick");
             modes::power_cut_mark_safe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
-            match result {
-                TaskModeTickResult::DirectContinue => {}
-                TaskModeTickResult::Delay(duration) => {
-                    Mono::delay(duration).await;
-                }
-                TaskModeTickResult::EnterStop2 => {
+                match result {
+                    TaskModeTickResult::DirectContinue => {}
+                    TaskModeTickResult::Delay(duration) => {
+                        Mono::delay(duration).await;
+                    }
+                    TaskModeTickResult::DelayUntil(duration) => {
+                        let target = iteration_start + duration;
+                        Mono::delay_until(target).await;
+                    }
+                    TaskModeTickResult::EnterStop2 => {
                     rprintln!("Going to sleep");
                     #[cfg(not(feature = "online_benchmarking"))]
                     {

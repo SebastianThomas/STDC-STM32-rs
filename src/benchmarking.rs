@@ -14,7 +14,7 @@ pub struct BenchmarkSample {
 }
 
 #[cfg(all(target_os = "none", feature = "online_benchmarking"))]
-const CLOCK_HZ: u64 = 32_000_000; // TODO: Check this against HSI, PLL
+const CLOCK_HZ: u64 = 16_000_000;
 
 #[cfg(all(target_os = "none", feature = "online_benchmarking"))]
 static WFI_COUNT: Mutex<RefCell<u64>> = Mutex::new(RefCell::new(0));

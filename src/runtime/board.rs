@@ -24,7 +24,7 @@ pub fn init_clocks(
     apb1r1: &mut APB1R1,
 ) -> Clocks {
     let clocks = cfgr
-        .sysclk_with_pll(8.MHz(), PllConfig::new(2, 8, PllDivider::Div8))
+        .sysclk_with_pll(16.MHz(), PllConfig::new(2, 8, PllDivider::Div8))
         .freeze(acr, pwr);
 
     // Timer input clock = PCLK1 * 2 when APB1 prescaler > 1.

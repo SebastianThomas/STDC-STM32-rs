@@ -54,7 +54,7 @@ impl EmulatedDiveProfile {
     }
 
     pub const fn deep() -> Self {
-        Self::new([40, 320, 160], 9.0 * 100_000.0, 0.02)
+        Self::new([40, 320, 160], 90.0 * 100_000.0, 0.02)
     }
 
     pub const fn with_deco_overlay(mut self, stop_depth_pa: f32, hold_samples: usize) -> Self {

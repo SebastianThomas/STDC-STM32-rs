@@ -21,6 +21,23 @@ t:
 test-bench:
 	cargo test --target x86_64-apple-darwin --lib --tests benchmark_tests -- --nocapture
 
+bench:
+	just sim-all
+
+sim-small:
+	cargo test --target x86_64-apple-darwin --lib benchmark_tests::benchmark_small_profile -- --nocapture
+
+sim-large:
+	cargo test --target x86_64-apple-darwin --lib benchmark_tests::benchmark_large_profile -- --nocapture
+
+sim-deep:
+	cargo test --target x86_64-apple-darwin --lib benchmark_tests::benchmark_deep_profile -- --nocapture
+
+sim-all:
+	just sim-small
+	just sim-large
+	just sim-deep
+
 embed:
 	# Example: just features=online_benchmarking,bluetooth,display embed
 	if [[ -n "{{features}}" ]]; then cargo embed --features "{{features}}"; else cargo embed; fi

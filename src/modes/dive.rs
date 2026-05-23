@@ -3,7 +3,7 @@ use core::fmt::Debug;
 use rtt_target::rprintln;
 use stdc_diving_algorithms::{
     deco_algorithm::{DecoSettings, MVALUES, TISSUES},
-    dive::{DiveMeasurement, DiveProfile},
+    dive::{DiveMeasurement, DiveProfile, get_ascent_rate_per_meter},
     gas::{GasDensitySettings, GasMix, MAX_GAS_DENSITY, TissuesLoading},
     loadings_from_dive_profile,
     o2tox::{O2ExposureType, O2ToxCalculation, calculate_toxicity_diff},
@@ -18,6 +18,7 @@ use stm32l4xx_hal::{
 use stdc_stm32_rs::{
     algorithms::{
         helpers::datetime_to_epoch_seconds,
+        profile_emulation::EmulatedDiveProfile,
         rate_algorithm::{DynamicDiffAimdRateAlgorithm, RateAlgorithm},
     },
     benchmarking,
@@ -59,6 +60,8 @@ pub struct DiveRuntime<const NR_GASES: usize> {
     gases_enabled: [bool; NR_GASES],
     loading: TissuesLoading<{ NUM_TISSUES }, Pa>,
     current_gas_mode_idx: CurrentDiveModeWithInfo,
+    #[cfg(feature = "online_benchmarking")]
+    emulated_profile: EmulatedDiveProfile,
     last_measurement_millis: u32,
     last_logged_millis: u32,
     last_logged_pressure: Pa,
@@ -146,6 +149,8 @@ where
         gases_enabled: *gases_enabled,
         loading,
         current_gas_mode_idx,
+        #[cfg(feature = "online_benchmarking")]
+        emulated_profile: EmulatedDiveProfile::deep(),
         last_measurement_millis: dive_start_millis,
         last_logged_millis: dive_start_millis,
         last_logged_pressure: surface_pressure,
@@ -188,11 +193,79 @@ where
     let _ = update_dive_time_if_due(&mut runtime.task_state, runtime.dive_start_millis);
 
     let measurement_millis = millis_tim5();
+    #[cfg(not(feature = "online_benchmarking"))]
     ms5849_i2c.read_i2c().await;
     let temperature_c = ms5849_i2c.temperature();
     let mut latest_measurements = latest_measurements;
     let mut flash_log: Option<DiveFlashLog> = None;
 
+    #[cfg(feature = "online_benchmarking")]
+    {
+        let emulated_sample_index = (current_millis / 1_000) as usize;
+        let emulated_point = runtime.emulated_profile.point_at(
+            runtime.surface_pressure.to_f32(),
+            1_000,
+            emulated_sample_index,
+        );
+        let pressure = Pa::new(emulated_point.depth_pa);
+        let depth = msw(emulated_point.depth_msw);
+
+        runtime.surfaced_since_millis = None;
+        latest_measurements = latest_measurements.record_environment(
+            pressure,
+            Some(depth),
+            None,
+            measurement_millis,
+        );
+        handle_depth_measurement(
+            pressure,
+            depth,
+            latest_calculations_state,
+            &mut runtime.last_measurement_millis,
+            measurement_millis,
+            &mut runtime.max_depth,
+            &mut runtime.loading,
+            &runtime.gases,
+            &runtime.gases_enabled,
+            &runtime.current_gas_mode_idx,
+        );
+        flash_log = flash_log_tick_plan(
+            &mut runtime.flash_log_algorithm,
+            &mut runtime.last_logged_millis,
+            &mut runtime.last_logged_pressure,
+            measurement_millis,
+            pressure,
+            DiveMeasurement {
+                time_ms: measurement_millis as usize,
+                depth: pressure,
+                gas: runtime.current_gas_mode_idx.to_log_byte() as usize,
+            },
+            &latest_measurements,
+        );
+
+        if let Ok(schedule) = calc_deco_schedule::<16, NUM_GASES>(
+            &runtime.loading,
+            &runtime.gases,
+            &runtime.gases_enabled,
+            &runtime.deco_settings,
+        ) {
+            if let Some(first_stop) = schedule.first_stop() {
+                let hold_time = schedule.get_deco_tts(&get_ascent_rate_per_meter(9));
+                let hold_samples = hold_time
+                    .as_millis()
+                    .saturating_add(999)
+                    .div_euclid(1_000) as usize;
+                runtime.emulated_profile = runtime.emulated_profile.with_deco_overlay(
+                    first_stop.depth().to_pa().to_f32(),
+                    hold_samples.max(1),
+                );
+            } else {
+                runtime.emulated_profile = runtime.emulated_profile.without_deco_overlay();
+            }
+        }
+    }
+
+    #[cfg(not(feature = "online_benchmarking"))]
     match ms5849_i2c.depth_relative_or_altitude(runtime.surface_pressure) {
         Ok(DepthOrAltitude::Depth { pressure, depth }) => {
             runtime.surfaced_since_millis = None;

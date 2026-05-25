@@ -10,8 +10,8 @@ use stdc_diving_algorithms::{
     pressure_unit::{AbsPressure, Pa, msw},
 };
 use stdc_stm32_rs::{
+    algorithms::rate_algorithm::{DecoUpdateRateAlgorithm, O2ToxUpdateRateAlgorithm},
     components::{
-        MS5849,
         battery_status::{BatterySnapshot, BatteryStatusI2C},
         bluetooth::UartBluetoothModule,
         display::SpiDisplay,
@@ -19,6 +19,9 @@ use stdc_stm32_rs::{
     },
     constants::barometric::SURFACE_PA,
 };
+
+#[cfg(not(feature = "live_sim"))]
+use stdc_stm32_rs::components::MS5849;
 
 pub type DelayMutex = CmMutex<RefCell<Delay>>;
 
@@ -38,6 +41,9 @@ pub type Pb7I2c1Sda = stm32l4xx_hal::gpio::Pin<
     7,
 >;
 pub type SensorI2c = I2c<pac::I2C1, (Pb6I2c1Scl, Pb7I2c1Sda)>;
+#[cfg(feature = "live_sim")]
+pub type SensorMs5849 = stdc_stm32_rs::components::LiveSimMS5849<SensorI2c, ()>;
+#[cfg(not(feature = "live_sim"))]
 pub type SensorMs5849 = MS5849<SensorI2c, ()>;
 
 pub type Pc0I2c3Scl = stm32l4xx_hal::gpio::Pin<
@@ -257,10 +263,18 @@ pub struct LatestCalculationsState<const NUM_TISSUES: usize, P>
 where
     P: const AbsPressure,
 {
-    pub tissue_loadings: TissuesLoading<NUM_TISSUES, P>,
+    pub deco: LatestDecoCalculationsState<NUM_TISSUES, P>,
     pub o2_tox: LatestO2CalculationsState,
 }
 
+#[derive(Clone, Debug)]
+pub struct LatestDecoCalculationsState<const NUM_TISSUES: usize, P>
+where
+    P: const AbsPressure,
+{
+    pub tissue_loadings: TissuesLoading<NUM_TISSUES, P>,
+    pub deco_rate_algorithm: DecoUpdateRateAlgorithm,
+}
 #[derive(Clone, Debug)]
 pub struct LatestO2CalculationsState {
     pub o2_tox_single: O2ToxicityPercentage,
@@ -268,6 +282,7 @@ pub struct LatestO2CalculationsState {
     pub measurements_since_o2_calc: [DiveMeasurement<Pa>; MEASUREMENT_BUFFER_SIZE],
     pub nr_measurements_since_o2_calc: usize,
     pub next_o2_tox_update_millis: u32,
+    pub o2_tox_rate_algorithm: O2ToxUpdateRateAlgorithm,
 }
 
 impl<const NUM_TISSUES: usize, P: const AbsPressure> LatestCalculationsState<NUM_TISSUES, P> {
@@ -283,8 +298,12 @@ impl<const NUM_TISSUES: usize, P: const AbsPressure> LatestCalculationsState<NUM
                 }; MEASUREMENT_BUFFER_SIZE],
                 nr_measurements_since_o2_calc: 0,
                 next_o2_tox_update_millis: 0,
+                o2_tox_rate_algorithm: O2ToxUpdateRateAlgorithm::default(),
             },
-            tissue_loadings: TissuesLoading::new(ambient, &gas::AIR),
+            deco: LatestDecoCalculationsState {
+                tissue_loadings: TissuesLoading::new(ambient, &gas::AIR),
+                deco_rate_algorithm: DecoUpdateRateAlgorithm::default(),
+            },
         }
     }
 }

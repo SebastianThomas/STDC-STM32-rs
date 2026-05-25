@@ -91,55 +91,31 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin> SpiFlash<SPI, CSPin> {
     }
 
     pub fn erase_chip(&mut self) -> Result<(), SpiError> {
-        self.write_enable(true)?;
-        let erase_res = self.spi_write_operation(&[ERASE_CHIP_INSTRUCTION]);
-        let disable_res = self.write_enable(false);
-        if let Err(e) = erase_res {
-            Err(e)
-        } else {
-            disable_res
-        }
+        self.erase_with_instruction(ERASE_CHIP_INSTRUCTION, 0)
     }
 
     pub fn erase_64k(&mut self, addr: u32) -> Result<(), SpiError> {
-        let mut buf = [0u8; 4];
-        buf[0] = ERASE_64K_INSTRUCTION;
-        buf[1..=3].copy_from_slice(&get_24bit_addr(addr));
-        self.write_enable(true)?;
-        let erase_res = self.spi_write_operation(&buf);
-        let disable_res = self.write_enable(false);
-        if let Err(e) = erase_res {
-            Err(e)
-        } else {
-            disable_res
-        }
+        self.erase_with_instruction(ERASE_64K_INSTRUCTION, addr)
     }
 
     pub fn erase_32k(&mut self, addr: u32) -> Result<(), SpiError> {
-        let mut buf = [0u8; 4];
-        buf[0] = ERASE_32K_INSTRUCTION;
-        buf[1..=3].copy_from_slice(&get_24bit_addr(addr));
-        self.write_enable(true)?;
-        let erase_res = self.spi_write_operation(&buf);
-        let disable_res = self.write_enable(false);
-        if let Err(e) = erase_res {
-            Err(e)
-        } else {
-            disable_res
-        }
+        self.erase_with_instruction(ERASE_32K_INSTRUCTION, addr)
     }
 
     pub fn erase_4k(&mut self, addr: u32) -> Result<(), SpiError> {
+        self.erase_with_instruction(ERASE_4K_INSTRUCTION, addr)
+    }
+
+    fn erase_with_instruction(&mut self, instruction: u8, addr: u32) -> Result<(), SpiError> {
         let mut buf = [0u8; 4];
-        buf[0] = ERASE_4K_INSTRUCTION;
+        buf[0] = instruction;
         buf[1..=3].copy_from_slice(&get_24bit_addr(addr));
         self.write_enable(true)?;
         let erase_res = self.spi_write_operation(&buf);
         let disable_res = self.write_enable(false);
-        if let Err(e) = erase_res {
-            Err(e)
-        } else {
-            disable_res
+        match erase_res {
+            Err(e) => Err(e),
+            Ok(_) => disable_res,
         }
     }
 

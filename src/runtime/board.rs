@@ -1,4 +1,7 @@
-use core::task::{Context, Poll};
+use core::{
+    future::Future,
+    task::{Context, Poll},
+};
 use cortex_m::interrupt::free;
 
 use stm32l4xx_hal::{
@@ -15,6 +18,25 @@ use stm32l4xx_hal::{
 use stm32l4xx_hal::rtc::Rtc;
 
 use crate::*;
+
+#[cfg(feature = "live_sim")]
+use stdc_stm32_rs::components::LiveSimMS5849;
+#[cfg(not(feature = "live_sim"))]
+use stdc_stm32_rs::components::MS5849;
+
+fn run_until_ready<F: Future>(future: F) -> F::Output {
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let mut future = future;
+    let mut future = unsafe { core::pin::Pin::new_unchecked(&mut future) };
+
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(value) => break value,
+            Poll::Pending => {}
+        }
+    }
+}
 
 pub fn init_clocks(
     cfgr: stm32l4xx_hal::rcc::CFGR,
@@ -50,29 +72,19 @@ pub fn init_clocks(
 }
 
 pub fn create_sensor_ms5849(i2c: SensorI2c) -> SensorMs5849 {
-    let mut fut = MS5849::new_i2c(i2c);
-    let mut fut = unsafe { core::pin::Pin::new_unchecked(&mut fut) };
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    loop {
-        match fut.as_mut().poll(&mut cx) {
-            Poll::Ready(val) => break val,
-            Poll::Pending => {}
-        };
+    #[cfg(feature = "live_sim")]
+    {
+        run_until_ready(LiveSimMS5849::new_i2c(i2c))
+    }
+
+    #[cfg(not(feature = "live_sim"))]
+    {
+        run_until_ready(MS5849::new_i2c(i2c))
     }
 }
 
 pub fn create_battery_status(battery_gauge_i2c: BatteryI2c) -> BatteryGauge {
-    let mut fut = BatteryStatusI2C::new(battery_gauge_i2c, Max17262Variant::R);
-    let mut fut = unsafe { core::pin::Pin::new_unchecked(&mut fut) };
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    loop {
-        match fut.as_mut().poll(&mut cx) {
-            Poll::Ready(val) => break val,
-            Poll::Pending => {}
-        };
-    }
+    run_until_ready(BatteryStatusI2C::new(battery_gauge_i2c, Max17262Variant::R))
 }
 
 pub fn create_flash_device<SPI: Transfer<u8> + Write<u8>, CS: OutputPin>(
@@ -215,9 +227,4 @@ pub fn stop_mcu_after_benchmark() -> ! {
     loop {
         cortex_m::asm::bkpt();
     }
-}
-
-#[cfg(not(feature = "online_benchmarking"))]
-pub fn stop_mcu_after_benchmark() {
-    rprintln!("Benchmark complete (no-op on non-benchmark build)");
 }

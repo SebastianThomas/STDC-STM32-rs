@@ -1,33 +1,25 @@
-use core::fmt::Debug;
-
 use rtt_target::rprintln;
 use stdc_diving_algorithms::{
-    deco_algorithm::{DecoSettings, MVALUES, TISSUES},
-    dive::{DiveMeasurement, DiveProfile},
-    gas::{GasDensitySettings, GasMix, MAX_GAS_DENSITY, TissuesLoading},
-    loadings_from_dive_profile,
+    deco_algorithm::DecoSettings,
+    dive::DiveMeasurement,
+    gas::{GasDensitySettings, GasMix, MAX_GAS_DENSITY},
     o2tox::{O2ExposureType, O2ToxCalculation, calculate_toxicity_diff},
     pressure_unit::{Bar, Pa, Pressure, msw},
     setup::NUM_TISSUES,
 };
 
-#[cfg(not(feature = "live_sim"))]
 use stdc_stm32_rs::constants::barometric::DepthOrAltitude;
-use stm32l4xx_hal::{
-    hal::blocking::i2c::{Read, Write, WriteRead},
-    rtc::Rtc,
-};
+use stm32l4xx_hal::rtc::Rtc;
 
 #[cfg(feature = "live_sim")]
-use stdc_stm32_rs::algorithms::profile_emulation::EmulatedDiveProfile;
+use stdc_stm32_rs::components::LiveSimEmulationControl;
 use stdc_stm32_rs::{
     algorithms::{
         helpers::datetime_to_epoch_seconds,
-        rate_algorithm::{DynamicDiffAimdRateAlgorithm, RateAlgorithm},
+        rate_algorithm::{FlashLogRateAlgorithm, RateAlgorithm},
     },
     benchmarking,
     components::{
-        MS5849,
         dive_log::{
             CurrentDiveModeWithInfo, DecoAlgorithmType, LevelState, LogDiveControlDataBlock,
             LogPointData, LogPointMetadata,
@@ -40,14 +32,12 @@ use stdc_stm32_rs::{
 
 use super::{display_set_depth, millis_tim5, millis_tim5_since};
 use crate::{
-    LatestCalculationsState, LatestMeasurements, MEASUREMENT_BUFFER_SIZE,
+    LatestCalculationsState, LatestMeasurements, MEASUREMENT_BUFFER_SIZE, SensorMs5849,
     tasks::dive::{
-        DiveTaskState, o2tox_update_interval_millis, refresh_display_if_due,
-        update_deco_schedule_if_due, update_dive_time_if_due,
+        DiveTaskState, refresh_display_if_due, update_deco_schedule_if_due, update_dive_time_if_due,
     },
 };
 
-#[cfg(not(feature = "live_sim"))]
 const DIVE_END_TOLERANCE_MILLIS: u32 = 10_000;
 
 #[cfg(feature = "lin_exp")]
@@ -61,16 +51,13 @@ pub struct DiveRuntime<const NR_GASES: usize> {
     deco_settings: DecoSettings<Pa>,
     gases: [GasMix<f32>; NR_GASES],
     gases_enabled: [bool; NR_GASES],
-    loading: TissuesLoading<{ NUM_TISSUES }, Pa>,
     current_gas_mode_idx: CurrentDiveModeWithInfo,
-    #[cfg(feature = "live_sim")]
-    emulated_profile: EmulatedDiveProfile,
     last_measurement_millis: u32,
     last_logged_millis: u32,
     last_logged_pressure: Pa,
     max_depth: Pa,
     surfaced_since_millis: Option<u32>,
-    flash_log_algorithm: DynamicDiffAimdRateAlgorithm<Pa>,
+    flash_log_algorithm: FlashLogRateAlgorithm,
     task_state: DiveTaskState,
     #[cfg(feature = "online_benchmarking")]
     pub is_benchmark_profile: bool,
@@ -101,23 +88,11 @@ where
 
     let deco_settings = DecoSettings {
         gas_density_settings: GasDensitySettings::Limit {
-            limit: MAX_GAS_DENSITY.to_pa(),
+            limit_g_l: MAX_GAS_DENSITY,
         },
         max_deco_po2: Bar::new(1.6).to_pa(),
     };
 
-    let dive_profile = DiveProfile {
-        dive_id: 1,
-        max_depth: surface_pressure,
-        gases: *gases,
-        measurements: [DiveMeasurement {
-            depth: surface_pressure,
-            time_ms: dive_start_millis as usize,
-            gas: 0,
-        }],
-    };
-
-    let loading = loadings_from_dive_profile(&TISSUES, &dive_profile, &MVALUES, surface_pressure);
     let current_gas_mode_idx = CurrentDiveModeWithInfo::OC { gas_idx: 0 };
 
     #[cfg(feature = "online_benchmarking")]
@@ -157,22 +132,13 @@ where
         deco_settings,
         gases: *gases,
         gases_enabled: *gases_enabled,
-        loading,
         current_gas_mode_idx,
-        #[cfg(feature = "live_sim")]
-        emulated_profile: EmulatedDiveProfile::deep(),
         last_measurement_millis: dive_start_millis,
         last_logged_millis: dive_start_millis,
         last_logged_pressure: surface_pressure,
         max_depth: surface_pressure,
         surfaced_since_millis: None,
-        flash_log_algorithm: DynamicDiffAimdRateAlgorithm::new::<3, 4>(
-            5000,
-            20000,
-            Bar::new(0.2).to_pa(),
-            Bar::new(1.0).to_pa(),
-            Bar::new(0.2).to_pa(),
-        ),
+        flash_log_algorithm: FlashLogRateAlgorithm::default(),
         task_state: DiveTaskState::new(dive_start_millis, surface_pressure.to_msw()),
         #[cfg(feature = "online_benchmarking")]
         is_benchmark_profile: true,
@@ -181,19 +147,15 @@ where
 
 pub async fn run_dive_mode_tick<
     D: stdc_stm32_rs::components::display::LedDisplay,
-    I: Write + Read + WriteRead,
     const NUM_GASES: usize,
 >(
     runtime: &mut DiveRuntime<NUM_GASES>,
     display: &mut D,
-    ms5849_i2c: &mut MS5849<I, ()>,
+    ms5849_i2c: &mut SensorMs5849,
     latest_measurements: LatestMeasurements,
     latest_calculations_state: &mut LatestCalculationsState<{ NUM_TISSUES }, Pa>,
 ) -> (Option<Pa>, LatestMeasurements, Option<DiveFlashLog>)
 where
-    <I as Read>::Error: Debug,
-    <I as Write>::Error: Debug,
-    <I as WriteRead>::Error: Debug,
     [(); NUM_GASES * 3]: Sized,
     [(); 24 + NUM_GASES * 3]: Sized,
     [(); 4 + 24 + NUM_GASES * 3]: Sized,
@@ -212,73 +174,8 @@ where
     let mut latest_measurements = latest_measurements;
 
     let flash_log: Option<DiveFlashLog>;
-
-    #[cfg(feature = "live_sim")]
-    {
-        let emulated_sample_index = (current_millis / 1_000) as usize;
-        let emulated_point = runtime.emulated_profile.point_at(
-            runtime.surface_pressure.to_f32(),
-            1_000,
-            emulated_sample_index,
-        );
-        let pressure = Pa::new(emulated_point.depth_pa);
-        let depth = msw(emulated_point.depth_msw);
-
-        runtime.surfaced_since_millis = None;
-        latest_measurements = latest_measurements.record_environment(
-            pressure,
-            Some(depth),
-            temperature_c,
-            measurement_millis,
-        );
-        handle_depth_measurement(
-            pressure,
-            depth,
-            latest_calculations_state,
-            &mut runtime.last_measurement_millis,
-            measurement_millis,
-            &mut runtime.max_depth,
-            &mut runtime.loading,
-            &runtime.gases,
-            &runtime.gases_enabled,
-            &runtime.current_gas_mode_idx,
-        );
-        let deco_overlay = update_deco_schedule_if_due(
-            &mut runtime.task_state,
-            depth,
-            measurement_millis,
-            &runtime.loading,
-            &runtime.gases,
-            &runtime.gases_enabled,
-            &runtime.deco_settings,
-        );
-        flash_log = flash_log_tick_plan(
-            &mut runtime.flash_log_algorithm,
-            &mut runtime.last_logged_millis,
-            &mut runtime.last_logged_pressure,
-            measurement_millis,
-            pressure,
-            DiveMeasurement {
-                time_ms: measurement_millis as usize,
-                depth: pressure,
-                gas: runtime.current_gas_mode_idx.to_log_byte() as usize,
-            },
-            &latest_measurements,
-        );
-
-        if let Some(overlay) = deco_overlay {
-            if overlay.hold_samples == 0 {
-                runtime.emulated_profile = runtime.emulated_profile.without_deco_overlay();
-            } else {
-                runtime.emulated_profile = runtime
-                    .emulated_profile
-                    .with_deco_overlay(overlay.stop_depth_pa, overlay.hold_samples);
-            }
-        }
-    }
-
-    #[cfg(not(feature = "live_sim"))]
-    match ms5849_i2c.depth_relative_or_altitude(runtime.surface_pressure) {
+    let pressure = ms5849_i2c.pressure();
+    match ms5849_i2c.depth_relative_or_altitude(pressure, runtime.surface_pressure) {
         Ok(DepthOrAltitude::Depth { pressure, depth }) => {
             runtime.surfaced_since_millis = None;
             latest_measurements = latest_measurements.record_environment(
@@ -294,20 +191,29 @@ where
                 &mut runtime.last_measurement_millis,
                 measurement_millis,
                 &mut runtime.max_depth,
-                &mut runtime.loading,
                 &runtime.gases,
                 &runtime.gases_enabled,
                 &runtime.current_gas_mode_idx,
             );
-            let _ = update_deco_schedule_if_due(
+            let deco_overlay = update_deco_schedule_if_due(
                 &mut runtime.task_state,
                 depth,
                 measurement_millis,
-                &runtime.loading,
+                &latest_calculations_state.deco.tissue_loadings,
                 &runtime.gases,
                 &runtime.gases_enabled,
                 &runtime.deco_settings,
+                &mut latest_calculations_state.deco.deco_rate_algorithm,
             );
+            #[cfg(feature = "live_sim")]
+            if let Some(deco_overlay) = deco_overlay {
+                rprintln!("New Deco Overlay: {:?}", deco_overlay);
+                ms5849_i2c.sync_live_sim_dive_overlay(deco_overlay);
+            }
+
+            #[cfg(not(feature = "live_sim"))]
+            let _ = deco_overlay;
+
             flash_log = flash_log_tick_plan(
                 &mut runtime.flash_log_algorithm,
                 &mut runtime.last_logged_millis,
@@ -392,7 +298,6 @@ fn handle_depth_measurement<const NR_GASES: usize, const NUM_TISSUES: usize>(
     last_measurement_millis: &mut u32,
     measurement_millis: u32,
     max_depth: &mut Pa,
-    loading: &mut TissuesLoading<NUM_TISSUES, Pa>,
     gases: &[GasMix<f32>; NR_GASES],
     _gases_enabled: &[bool; NR_GASES],
     current_gas_mode_idx: &CurrentDiveModeWithInfo,
@@ -401,7 +306,7 @@ fn handle_depth_measurement<const NR_GASES: usize, const NUM_TISSUES: usize>(
         rprintln!("Measuring Pressure: {:?}, depth: {:?}", pressure, depth);
         display_set_depth(depth);
 
-        let time_delta = measurement_millis - *last_measurement_millis;
+        let time_delta = measurement_millis.wrapping_sub(*last_measurement_millis);
         *last_measurement_millis = measurement_millis;
 
         if *max_depth < pressure {
@@ -409,12 +314,11 @@ fn handle_depth_measurement<const NR_GASES: usize, const NUM_TISSUES: usize>(
         }
 
         let current_gas = current_gas_mode_idx.to_fixed_gas(gases, pressure);
-        loading.tick(
+        latest_calculations_state.deco.tissue_loadings.tick(
             time_delta.try_into().unwrap_or(u16::MAX),
             pressure,
             &current_gas,
         );
-        latest_calculations_state.tissue_loadings = loading.clone();
     });
 
     let current_measurement = DiveMeasurement {
@@ -428,10 +332,26 @@ fn handle_depth_measurement<const NR_GASES: usize, const NUM_TISSUES: usize>(
         .o2_tox
         .nr_measurements_since_o2_calc = 1;
 
-    let next_o2_tox_update_millis = benchmarking::measure_and_log("dive.o2_tox.rate", || {
-        measurement_millis.saturating_add(o2tox_update_interval_millis(depth))
+    let next_o2_tox_update_millis = latest_calculations_state.o2_tox.next_o2_tox_update_millis;
+    let o2_tox_update_interval_millis = benchmarking::measure_and_log("dive.o2_tox.rate", || {
+        latest_calculations_state
+            .o2_tox
+            .o2_tox_rate_algorithm
+            .next_iter(depth, depth)
+            .unwrap_or(0)
     });
-    latest_calculations_state.o2_tox.next_o2_tox_update_millis = next_o2_tox_update_millis;
+
+    if next_o2_tox_update_millis == 0 {
+        latest_calculations_state.o2_tox.next_o2_tox_update_millis =
+            measurement_millis.saturating_add(o2_tox_update_interval_millis);
+        #[cfg(feature = "online_benchmarking")]
+        benchmarking::log_decision(
+            "dive.o2_tox.rate",
+            false,
+            Some(o2_tox_update_interval_millis),
+        );
+        return;
+    }
 
     if measurement_millis < next_o2_tox_update_millis {
         #[cfg(feature = "online_benchmarking")]
@@ -442,6 +362,9 @@ fn handle_depth_measurement<const NR_GASES: usize, const NUM_TISSUES: usize>(
         );
         return;
     }
+
+    latest_calculations_state.o2_tox.next_o2_tox_update_millis =
+        measurement_millis.saturating_add(o2_tox_update_interval_millis);
 
     benchmarking::measure_and_log("dive.o2_tox", || {
         latest_calculations_state.o2_tox.o2_tox_single = calculate_toxicity_diff(
@@ -457,8 +380,8 @@ fn handle_depth_measurement<const NR_GASES: usize, const NUM_TISSUES: usize>(
     benchmarking::log_decision("dive.o2_tox.rate", true, None);
 }
 
-fn flash_log_tick_plan<R: RateAlgorithm<Pa, Pa, u32>>(
-    flash_log_algorithm: &mut R,
+fn flash_log_tick_plan(
+    flash_log_algorithm: &mut FlashLogRateAlgorithm,
     last_logged_millis: &mut u32,
     last_logged_pressure: &mut Pa,
     measurement_millis: u32,
@@ -466,7 +389,9 @@ fn flash_log_tick_plan<R: RateAlgorithm<Pa, Pa, u32>>(
     measurement: DiveMeasurement<Pa>,
     latest_measurements: &LatestMeasurements,
 ) -> Option<DiveFlashLog> {
-    let next_log_time_delta = flash_log_algorithm.next_iter(*last_logged_pressure, pressure);
+    let elapsed_since_last_log = measurement_millis.saturating_sub(*last_logged_millis);
+    let next_log_time_delta =
+        flash_log_algorithm.next_iter((*last_logged_pressure, elapsed_since_last_log), pressure);
     let next_iter_due_in = next_log_time_delta.map(|n| *last_logged_millis + n);
     match next_iter_due_in {
         Ok(next_iter) => {
@@ -487,5 +412,3 @@ fn flash_log_tick_plan<R: RateAlgorithm<Pa, Pa, u32>>(
         }
     }
 }
-
-// UART logger removed; use rprintln! instead

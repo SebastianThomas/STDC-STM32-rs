@@ -106,7 +106,7 @@ where
     let result = fut.await;
 
     #[cfg(all(target_os = "none", feature = "online_benchmarking"))]
-    let cycles = cortex_m::peripheral::DWT::cycle_count() as u64 - start;
+    let cycles = (cortex_m::peripheral::DWT::cycle_count() as u64).wrapping_sub(start);
     #[cfg(all(target_os = "none", feature = "online_benchmarking"))]
     let nanos = cycles.saturating_mul(1_000_000_000) / CLOCK_HZ;
 

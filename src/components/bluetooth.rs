@@ -52,6 +52,34 @@ pub trait BluetoothModule {
     }
 }
 
+macro_rules! impl_bluetooth_module {
+    ($ty:ident<$tx:ident, $rx:ident, $txi:ident>) => {
+        impl<$tx, $rx, $txi, E> BluetoothModule for $ty<$tx, $rx, $txi>
+        where
+            $tx: Write<u8, Error = E>,
+            $rx: Read<u8, Error = E>,
+            $txi: InputPin,
+        {
+            type TX = $tx;
+            type RX = $rx;
+            type TXI = $txi;
+            type UartError = E;
+
+            fn uart_tx(&mut self) -> &mut Self::TX {
+                &mut self.uart_tx
+            }
+
+            fn uart_rx(&mut self) -> &mut Self::RX {
+                &mut self.uart_rx
+            }
+
+            fn tx_ind(&self) -> &Self::TXI {
+                &self.tx_ind
+            }
+        }
+    };
+}
+
 #[derive(Debug)]
 pub enum Error<E> {
     Uart(E),
@@ -100,53 +128,8 @@ where
     }
 }
 
-impl<TX, RX, TXI, E> BluetoothModule for UartBluetoothModule<TX, RX, TXI>
-where
-    TX: Write<u8, Error = E>,
-    RX: Read<u8, Error = E>,
-    TXI: InputPin,
-{
-    type TX = TX;
-    type RX = RX;
-    type TXI = TXI;
-    type UartError = E;
-
-    fn uart_tx(&mut self) -> &mut Self::TX {
-        &mut self.uart_tx
-    }
-
-    fn uart_rx(&mut self) -> &mut Self::RX {
-        &mut self.uart_rx
-    }
-
-    fn tx_ind(&self) -> &Self::TXI {
-        &self.tx_ind
-    }
-}
-
-impl<TX, RX, TXI, E> BluetoothModule for UartBluetoothCommandMode<TX, RX, TXI>
-where
-    TX: Write<u8, Error = E>,
-    RX: Read<u8, Error = E>,
-    TXI: InputPin,
-{
-    type TX = TX;
-    type RX = RX;
-    type TXI = TXI;
-    type UartError = E;
-
-    fn uart_tx(&mut self) -> &mut Self::TX {
-        &mut self.uart_tx
-    }
-
-    fn uart_rx(&mut self) -> &mut Self::RX {
-        &mut self.uart_rx
-    }
-
-    fn tx_ind(&self) -> &Self::TXI {
-        &self.tx_ind
-    }
-}
+impl_bluetooth_module!(UartBluetoothModule<TX, RX, TXI>);
+impl_bluetooth_module!(UartBluetoothCommandMode<TX, RX, TXI>);
 
 impl<TX, RX, TXI, E> UartBluetoothModule<TX, RX, TXI>
 where

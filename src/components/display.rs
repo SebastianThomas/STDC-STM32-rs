@@ -15,7 +15,7 @@ pub mod ssd1353;
 
 pub use spi::SpiDisplay;
 
-pub const MAX_STOP_NUMS: usize = 16;
+pub const MAX_STOP_NUMS: usize = 31;
 pub const MAX_STOP_DEPTH: f32 = MAX_STOP_NUMS as f32 * DINC.to_msw().to_f32();
 pub struct DisplayState {
     pub depth: msw,

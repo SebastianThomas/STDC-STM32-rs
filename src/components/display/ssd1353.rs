@@ -188,6 +188,10 @@ fn measure_text_width(chars: usize, scale: u8) -> u16 {
     char_width * chars as u16 - (FONT_SPACING as u16 * scale as u16)
 }
 
+fn glyph_bounding_box(scale: u8) -> (u8, u8) {
+    (FONT_WIDTH * scale, FONT_HEIGHT * scale)
+}
+
 impl<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> SpiDisplay<SPI, PINS, EN, RST, NDC>
 where
     Spi<SPI, PINS>: Write<u8>,
@@ -327,7 +331,7 @@ where
         Ok(())
     }
 
-    fn draw_scaled_char(
+    fn draw_scaled_char_batched(
         &mut self,
         x: u8,
         y: u8,
@@ -337,15 +341,34 @@ where
     ) -> Result<(), SpiError> {
         let glyph = glyph_5x7(byte);
 
-        for (col, col_bits) in glyph.iter().enumerate() {
-            for row in 0..FONT_HEIGHT as usize {
-                if (col_bits >> row) & 0x01 == 0 {
-                    continue;
-                }
+        let (width, height) = glyph_bounding_box(scale);
+        let x_end = x as u16 + width as u16 - 1;
+        let y_end = y as u16 + height as u16 - 1;
+        self.ssd1353_set_window(x, y, x_end as u8, y_end as u8)?;
+        self.write_command(CMD_WRITE_RAM)?;
+        self.set_data_mode()?;
 
-                let px = x as u16 + (col as u16 * scale as u16);
-                let py = y as u16 + (row as u16 * scale as u16);
-                self.ssd1353_fill_rect(px as u8, py as u8, scale, scale, color)?;
+        let hi = (color >> 8) as u8;
+        let lo = (color & 0xFF) as u8;
+        let bg_hi = (COLOR_BLACK >> 8) as u8;
+        let bg_lo = (COLOR_BLACK & 0xFF) as u8;
+        let row_pixels = width as usize;
+        let row_bytes = row_pixels * 2;
+        let mut row = [0u8; (FONT_WIDTH as usize * 3) * 2];
+
+        for glyph_row in 0..FONT_HEIGHT as usize {
+            for _scale_row in 0..scale as usize {
+                let mut offset = 0usize;
+                for col in 0..FONT_WIDTH as usize {
+                    let bit_on = (glyph[col] >> glyph_row) & 0x01 != 0;
+                    let (r_hi, r_lo) = if bit_on { (hi, lo) } else { (bg_hi, bg_lo) };
+                    for _ in 0..scale as usize {
+                        row[offset] = r_hi;
+                        row[offset + 1] = r_lo;
+                        offset += 2;
+                    }
+                }
+                self.write_data(&row[..row_bytes])?;
             }
         }
 
@@ -375,7 +398,7 @@ where
 
         for (idx, byte) in text.iter().take(draw_len).enumerate() {
             let x = start_x as u16 + idx as u16 * char_advance;
-            self.draw_scaled_char(x as u8, y, *byte, scale, color)?;
+            self.draw_scaled_char_batched(x as u8, y, *byte, scale, color)?;
         }
 
         Ok(())
@@ -399,7 +422,7 @@ where
 
         for (idx, byte) in text.iter().take(draw_len).enumerate() {
             let dx = x as u16 + idx as u16 * char_advance;
-            self.draw_scaled_char(dx as u8, y, *byte, scale, color)?;
+            self.draw_scaled_char_batched(dx as u8, y, *byte, scale, color)?;
         }
 
         Ok(())

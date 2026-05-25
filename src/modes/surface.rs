@@ -1,13 +1,9 @@
-use core::fmt::Debug;
-
 use rtt_target::rprintln;
 use stdc_diving_algorithms::{dive::DiveMeasurement, pressure_unit::Pa};
-use stm32l4xx_hal::hal::blocking::i2c::{Read, Write, WriteRead};
 
 use stdc_stm32_rs::{
     algorithms::rate_algorithm::{FixedRateAlgorithm, RateAlgorithm},
     components::{
-        MS5849,
         dive_log::{LevelState, LogPointData, LogPointMetadata},
         flash::Flash,
     },
@@ -19,8 +15,8 @@ use crate::DEFAULT_SURFACE_PRESSURE;
 use super::{SurfaceModeExit, millis_tim5, millis_tim5_since};
 
 const SURFACE_POLL_INTERVAL_MILLIS: u32 = 5 * 1000;
-
 const SURFACE_LOG_INTERVAL_MILLIS: u32 = 2 * 60 * 1000;
+
 pub struct SurfaceModeState {
     prev_surface_altitude: Option<Pa>,
     flash_log_algorithm: FixedRateAlgorithm,
@@ -33,13 +29,14 @@ impl SurfaceModeState {
         Self {
             prev_surface_altitude: None,
             flash_log_algorithm: FixedRateAlgorithm::new(SURFACE_LOG_INTERVAL_MILLIS),
-            last_logged_millis: 0,
+            last_logged_millis: millis_tim5(),
             last_polled_millis: Self::get_last_polled_millis_for_now(),
         }
     }
 
     pub fn reset_for_entry(&mut self) {
         self.prev_surface_altitude = None;
+        self.last_logged_millis = millis_tim5();
         self.last_polled_millis = Self::get_last_polled_millis_for_now();
     }
 
@@ -51,20 +48,15 @@ impl SurfaceModeState {
     }
 }
 
-pub async fn run_surface_mode_tick<I: Write + Read + WriteRead>(
+pub async fn run_surface_mode_tick(
     state: &mut SurfaceModeState,
-    ms5849_i2c: &mut MS5849<I, ()>,
+    ms5849_i2c: &mut crate::SensorMs5849,
     latest_measurements: crate::LatestMeasurements,
 ) -> (
     Option<SurfaceModeExit>,
     crate::LatestMeasurements,
     Option<(u32, Pa)>,
-)
-where
-    <I as Read>::Error: Debug,
-    <I as Write>::Error: Debug,
-    <I as WriteRead>::Error: Debug,
-{
+) {
     let millis_since = millis_tim5_since(state.last_polled_millis);
     if millis_since < SURFACE_POLL_INTERVAL_MILLIS {
         return (None, latest_measurements, None);
@@ -97,7 +89,7 @@ where
     state.last_polled_millis = current_measurement_millis;
 
     let flash_log = if let Ok(n) = next_flash_log {
-        if n >= current_measurement_millis {
+        if current_measurement_millis >= n {
             Some((current_measurement_millis, pressure))
         } else {
             None
@@ -113,16 +105,13 @@ where
     )
 }
 
-fn handle_surface_mode_tick_end<I: Write + Read + WriteRead>(
-    ms5849_i2c: &mut MS5849<I, ()>,
+fn handle_surface_mode_tick_end(
+    ms5849_i2c: &mut crate::SensorMs5849,
     state: &mut SurfaceModeState,
-) -> Option<SurfaceModeExit>
-where
-    <I as Read>::Error: Debug,
-    <I as Write>::Error: Debug,
-    <I as WriteRead>::Error: Debug,
-{
+) -> Option<SurfaceModeExit> {
+    let pressure = ms5849_i2c.pressure();
     match ms5849_i2c.depth_relative_or_altitude(
+        pressure,
         state
             .prev_surface_altitude
             .unwrap_or(DEFAULT_SURFACE_PRESSURE),

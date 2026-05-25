@@ -36,6 +36,7 @@
       "approve": true,
       "matchCommandLine": true
     },
-    "cargo check": true
+    "cargo check": true,
+    "cargo test": true
   }
 }

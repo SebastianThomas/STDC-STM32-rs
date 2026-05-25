@@ -1,67 +1,27 @@
 use stdc_diving_algorithms::{
     deco_algorithm::{DecoSettings, calc_deco_schedule},
     dive::{DiveMeasurement, get_ascent_rate_per_meter},
-    gas::{AIR, GasDensitySettings, GasMix, MAX_GAS_DENSITY, TissuesLoading},
+    gas::{
+        AIR, GasDensitySettings, GasMix, MAX_GAS_DENSITY, NX50, NX100, TMX10_80, TissuesLoading,
+    },
     o2tox::{O2ExposureType, O2ToxCalculation, O2ToxicityPercentage, calculate_toxicity_diff},
-    pressure_unit::{Bar, Pa, Pressure},
+    pressure_unit::{Bar, Pa, Pressure, msw},
     setup::NUM_TISSUES,
 };
 
 use crate::{
     algorithms::profile_emulation::EmulatedDiveProfile,
-    algorithms::rate_algorithm::{DynamicDiffAimdRateAlgorithm, RateAlgorithm},
+    algorithms::rate_algorithm::{
+        DecoUpdateRateAlgorithm, FlashLogRateAlgorithm, O2ToxUpdateRateAlgorithm, RateAlgorithm,
+    },
     benchmarking::{self, BenchmarkSample},
+    constants::barometric::SURFACE_PA,
     dive_log_host::{
         DecoAlgorithmType, LevelState, LogDiveControlDataBlock, LogPointData, LogPointMetadata,
     },
 };
 
-const DIVE_DECO_UPDATE_MIN_INTERVAL_MILLIS: u32 = 5_000;
-const DIVE_DECO_UPDATE_MAX_INTERVAL_MILLIS: u32 = 30_000;
-const DIVE_DECO_SPEED_REFERENCE_M_PER_S: f32 = 0.30;
-const DIVE_DECO_DEPTH_REFERENCE_M: f32 = 40.0;
-const DIVE_O2TOX_UPDATE_MIN_INTERVAL_MILLIS: u32 = 10_000;
-const DIVE_O2TOX_UPDATE_MAX_INTERVAL_MILLIS: u32 = 120_000;
-const DIVE_O2TOX_DEPTH_REFERENCE_M: f32 = 60.0;
 const DIVE_DISPLAY_REFRESH_INTERVAL_MILLIS: u32 = 250;
-
-fn lerp_u32(min_value: u32, max_value: u32, factor: f32) -> u32 {
-    let factor = factor.clamp(0.0, 1.0);
-    let span = max_value.abs_diff(min_value) as f32;
-    (min_value as f32 + span * factor + 0.5) as u32
-}
-
-fn deco_update_interval_millis(current_depth: Pa, previous_depth: Pa, elapsed_millis: u32) -> u32 {
-    let current_depth_m = current_depth.to_msw().to_f32().max(0.0);
-    let depth_factor = (current_depth_m / DIVE_DECO_DEPTH_REFERENCE_M).clamp(0.0, 1.0);
-    let depth_interval = lerp_u32(
-        DIVE_DECO_UPDATE_MAX_INTERVAL_MILLIS,
-        DIVE_DECO_UPDATE_MIN_INTERVAL_MILLIS,
-        depth_factor,
-    );
-
-    let depth_delta_m = (current_depth.to_msw().to_f32() - previous_depth.to_msw().to_f32()).abs();
-    let elapsed_seconds = (elapsed_millis.max(1) as f32) / 1000.0;
-    let speed_m_per_s = depth_delta_m / elapsed_seconds;
-    let speed_factor = (speed_m_per_s / DIVE_DECO_SPEED_REFERENCE_M_PER_S).clamp(0.0, 1.0);
-    let speed_interval = lerp_u32(
-        DIVE_DECO_UPDATE_MAX_INTERVAL_MILLIS,
-        DIVE_DECO_UPDATE_MIN_INTERVAL_MILLIS,
-        speed_factor,
-    );
-
-    depth_interval.min(speed_interval)
-}
-
-fn o2tox_update_interval_millis(current_depth: Pa) -> u32 {
-    let depth_m = current_depth.to_msw().to_f32().max(0.0);
-    let depth_factor = (depth_m / DIVE_O2TOX_DEPTH_REFERENCE_M).clamp(0.0, 1.0);
-    lerp_u32(
-        DIVE_O2TOX_UPDATE_MAX_INTERVAL_MILLIS,
-        DIVE_O2TOX_UPDATE_MIN_INTERVAL_MILLIS,
-        depth_factor,
-    )
-}
 
 use std::sync::Mutex;
 use std::vec::Vec;
@@ -74,6 +34,22 @@ use std::{
 };
 
 static REPORT_PRINT_LOCK: Mutex<()> = Mutex::new(());
+
+struct SchedulerSet {
+    deco_rate: DecoUpdateRateAlgorithm,
+    o2_rate: O2ToxUpdateRateAlgorithm,
+    flash_rate: FlashLogRateAlgorithm,
+}
+
+impl SchedulerSet {
+    fn new() -> Self {
+        SchedulerSet {
+            deco_rate: DecoUpdateRateAlgorithm::default(),
+            o2_rate: O2ToxUpdateRateAlgorithm::default(),
+            flash_rate: FlashLogRateAlgorithm::default(),
+        }
+    }
+}
 
 fn print_rule() {
     println!("+---------------------------------------------------------------+");
@@ -383,12 +359,18 @@ fn collect_deco_rate_decision_samples(
     collect_decision_samples(
         measurements,
         time_step_ms,
-        measurements[0].depth,
+        measurements[0].depth.to_msw(),
         |previous_depth, measurement, elapsed_millis| {
-            deco_update_interval_millis(measurement.depth, *previous_depth, elapsed_millis)
+            let mut rate_algorithm = DecoUpdateRateAlgorithm::default();
+            rate_algorithm
+                .next_iter(
+                    (*previous_depth, elapsed_millis),
+                    measurement.depth.to_msw(),
+                )
+                .unwrap()
         },
         |previous_depth, measurement| {
-            *previous_depth = measurement.depth;
+            *previous_depth = measurement.depth.to_msw();
         },
     )
 }
@@ -400,9 +382,16 @@ fn collect_o2_rate_decision_samples(
     collect_decision_samples(
         measurements,
         time_step_ms,
-        (),
-        |_, measurement, _| o2tox_update_interval_millis(measurement.depth),
-        |_, _| {},
+        measurements[0].depth.to_msw(),
+        |previous_depth, measurement, _| {
+            let mut rate_algorithm = O2ToxUpdateRateAlgorithm::default();
+            rate_algorithm
+                .next_iter(*previous_depth, measurement.depth.to_msw())
+                .unwrap()
+        },
+        |previous_depth, measurement| {
+            *previous_depth = measurement.depth.to_msw();
+        },
     )
 }
 
@@ -416,6 +405,49 @@ fn collect_display_refresh_decision_samples(
         (),
         |_, _, _| DIVE_DISPLAY_REFRESH_INTERVAL_MILLIS,
         |_, _| {},
+    )
+}
+
+fn collect_deco_rate_decision_samples_with(
+    measurements: &[DiveMeasurement<Pa>],
+    time_step_ms: u32,
+    rate_algorithm: &mut DecoUpdateRateAlgorithm,
+) -> Vec<DecisionSample> {
+    collect_decision_samples(
+        measurements,
+        time_step_ms,
+        measurements[0].depth.to_msw(),
+        |previous_depth, measurement, elapsed_millis| {
+            rate_algorithm
+                .next_iter(
+                    (*previous_depth, elapsed_millis),
+                    measurement.depth.to_msw(),
+                )
+                .unwrap()
+        },
+        |previous_depth, measurement| {
+            *previous_depth = measurement.depth.to_msw();
+        },
+    )
+}
+
+fn collect_o2_rate_decision_samples_with(
+    measurements: &[DiveMeasurement<Pa>],
+    time_step_ms: u32,
+    rate_algorithm: &mut O2ToxUpdateRateAlgorithm,
+) -> Vec<DecisionSample> {
+    collect_decision_samples(
+        measurements,
+        time_step_ms,
+        measurements[0].depth.to_msw(),
+        |previous_depth, measurement, _| {
+            rate_algorithm
+                .next_iter(*previous_depth, measurement.depth.to_msw())
+                .unwrap()
+        },
+        |previous_depth, measurement| {
+            *previous_depth = measurement.depth.to_msw();
+        },
     )
 }
 
@@ -433,11 +465,11 @@ fn generate_emulated_profile(
     profile: EmulatedDiveProfile,
     time_step_ms: u32,
 ) -> Vec<DiveMeasurement<Pa>> {
-    let surface = 101_325.0;
+    let surface = SURFACE_PA;
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         out.push(DiveMeasurement {
-            depth: Pa::new(profile.depth_at(surface, i)),
+            depth: profile.depth_at(surface, i),
             time_ms: i * time_step_ms as usize,
             gas: 0,
         });
@@ -466,21 +498,68 @@ where
 
     let surface = Pa::new(101_325.0);
     let mut loading = TissuesLoading::<NUM_TISSUES, Pa>::new(surface, &AIR);
-    let mut previous = measurements[0];
 
-    for measurement in measurements {
+    let max_depth_index = measurements
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| {
+            left.depth
+                .to_f32()
+                .partial_cmp(&right.depth.to_f32())
+                .unwrap()
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+
+    let mut previous = measurements[0];
+    for (i, measurement) in measurements.iter().enumerate().take(max_depth_index + 1) {
         let delta_ms = measurement.time_ms.saturating_sub(previous.time_ms);
         let delta_ms = if delta_ms > u16::MAX as usize {
             u16::MAX
         } else {
             delta_ms as u16
         };
+        if i < 6 {
+            eprintln!(
+                "loading[{}]: delta_ms={}, depth_pa={:.0}",
+                i,
+                delta_ms,
+                measurement.depth.to_f32()
+            );
+        }
         loading.tick(delta_ms, measurement.depth, &AIR);
         previous = *measurement;
     }
 
     let schedule =
-        calc_deco_schedule::<16, NUM_GASES>(&loading, gases, gases_enabled, deco_settings).ok()?;
+        match calc_deco_schedule::<16, NUM_GASES>(&loading, gases, gases_enabled, deco_settings) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("calc_deco_schedule returned error: {}", e);
+                return None;
+            }
+        };
+    eprintln!("calc_deco_schedule returned schedule: {:?}", schedule);
+    eprintln!("first_stop: {:?}", schedule.first_stop());
+    // Debug: print a few tissue loadings and m-values to diagnose why no stop was selected
+    use stdc_diving_algorithms::deco_algorithm::MVALUES;
+    eprintln!(
+        "loading.n2[0..4]: {:?}",
+        [
+            loading.n2[0].to_f32(),
+            loading.n2[1].to_f32(),
+            loading.n2[2].to_f32(),
+            loading.n2[3].to_f32(),
+        ]
+    );
+    eprintln!(
+        "MVALUES[0].max_saturation[0..3]: {:?}",
+        [
+            MVALUES[0].max_saturation[0].to_f32(),
+            MVALUES[0].max_saturation[1].to_f32(),
+            MVALUES[0].max_saturation[2].to_f32(),
+        ]
+    );
     let first_stop = schedule.first_stop()?;
     let hold_time = schedule.get_deco_tts(&get_ascent_rate_per_meter(9));
     let hold_samples = hold_time
@@ -499,23 +578,24 @@ fn generate_deco_aware_profile(
     profile: EmulatedDiveProfile,
     time_step_ms: u32,
 ) -> (EmulatedDiveProfile, Vec<DiveMeasurement<Pa>>) {
-    let gases = [AIR];
-    let gases_enabled = [true; 1];
+    let gases = [AIR, NX100, NX50, TMX10_80];
+    let gases_enabled = [true; 4];
     let deco_settings = DecoSettings {
         gas_density_settings: GasDensitySettings::Limit {
-            limit: MAX_GAS_DENSITY.to_pa(),
+            limit_g_l: MAX_GAS_DENSITY,
         },
         max_deco_po2: Bar::new(1.6).to_pa(),
     };
 
     let base = generate_emulated_profile(count, profile, time_step_ms);
     let Some(overlay) =
-        derive_deco_overlay::<1>(&base, &gases, &gases_enabled, &deco_settings, time_step_ms)
+        derive_deco_overlay::<4>(&base, &gases, &gases_enabled, &deco_settings, time_step_ms)
     else {
         return (profile, base);
     };
 
-    let realized_profile = profile.with_deco_overlay(overlay.stop_depth_pa, overlay.hold_samples);
+    let realized_profile =
+        profile.with_deco_overlay(Pa::new(overlay.stop_depth_pa), overlay.hold_samples);
     let realized_measurements = generate_emulated_profile(count, realized_profile, time_step_ms);
     (realized_profile, realized_measurements)
 }
@@ -563,7 +643,7 @@ fn export_benchmark_run(
     )?;
     writeln!(profile_csv, "sample_index,time_ms,stage,depth_pa,depth_msw")?;
     for (index, measurement) in measurements.iter().enumerate() {
-        let point = profile.point_at(101_325.0, time_step_ms, index);
+        let point = profile.point_at(SURFACE_PA, time_step_ms, index);
         writeln!(
             profile_csv,
             "{},{},{:?},{:.2},{:.4}",
@@ -571,7 +651,7 @@ fn export_benchmark_run(
             point.time_ms,
             point.stage,
             measurement.depth.to_f32(),
-            point.depth_msw
+            point.depth_msw.to_f32()
         )?;
     }
 
@@ -842,14 +922,16 @@ fn benchmark_dive_profile(
     let n = measurements.len();
 
     let surface = Pa::new(101_325.0);
-    let gases = [AIR];
-    let gases_enabled = [true; 1];
+    let gases = [AIR, NX50, NX100, TMX10_80];
+    let gases_enabled = [true; 4];
     let deco_settings = DecoSettings {
         gas_density_settings: GasDensitySettings::Limit {
-            limit: MAX_GAS_DENSITY.to_pa(),
+            limit_g_l: MAX_GAS_DENSITY,
         },
         max_deco_po2: Bar::new(1.6).to_pa(),
     };
+
+    let mut sched = SchedulerSet::new();
 
     let mut window_reports: Vec<(
         usize,
@@ -859,13 +941,7 @@ fn benchmark_dive_profile(
     )> = Vec::new();
     for window_size in WINDOW_SIZES {
         let mut loading = TissuesLoading::<NUM_TISSUES, Pa>::new(surface, &AIR);
-        let mut window_rate = DynamicDiffAimdRateAlgorithm::<Pa>::new::<3, 4>(
-            5_000,
-            20_000,
-            Bar::new(0.2).to_pa(),
-            Bar::new(1.0).to_pa(),
-            Bar::new(0.2).to_pa(),
-        );
+        let mut window_rate = FlashLogRateAlgorithm::default();
         let mut window_start = 0usize;
         let mut loading_samples: Vec<BenchmarkSample> = Vec::new();
         let mut deco_samples: Vec<BenchmarkSample> = Vec::new();
@@ -890,14 +966,18 @@ fn benchmark_dive_profile(
             loading_samples.push(loading_sample);
 
             let (_, deco_sample) = benchmarking::measure("deco.schedule.window", || {
-                calc_deco_schedule::<16, 1>(&loading, &gases, &gases_enabled, &deco_settings)
+                calc_deco_schedule::<16, 4>(&loading, &gases, &gases_enabled, &deco_settings)
             });
             deco_samples.push(deco_sample);
 
             let ((), rate_window_sample) = benchmarking::measure("flash.log.rate.window", || {
+                let mut last_rate_time = measurements[window_start].time_ms;
                 for measurement in &measurements[window_start..window_end] {
-                    let _ = window_rate.next_iter(current_for_rate, measurement.depth);
+                    let elapsed_ms = measurement.time_ms.saturating_sub(last_rate_time) as u32;
+                    let _ =
+                        window_rate.next_iter((current_for_rate, elapsed_ms), measurement.depth);
                     current_for_rate = measurement.depth;
+                    last_rate_time = measurement.time_ms;
                 }
             });
             rate_samples.push(rate_window_sample);
@@ -930,20 +1010,20 @@ fn benchmark_dive_profile(
     assert_eq!(window_reports.len(), WINDOW_SIZES.len());
 
     let mut rate_algorithm_samples: Vec<BenchmarkSample> = Vec::new();
-    let mut flash_rate = DynamicDiffAimdRateAlgorithm::<Pa>::new::<3, 4>(
-        5_000,
-        20_000,
-        Bar::new(0.2).to_pa(),
-        Bar::new(1.0).to_pa(),
-        Bar::new(0.2).to_pa(),
-    );
-    let mut current = surface;
+    let mut previous = measurements[0];
     for measurement in measurements {
+        let elapsed_ms = measurement
+            .time_ms
+            .saturating_sub(previous.time_ms)
+            .try_into()
+            .unwrap_or(u32::MAX);
         let (_, sample) = benchmarking::measure("flash.log.rate", || {
-            flash_rate.next_iter(current, measurement.depth)
+            sched
+                .flash_rate
+                .next_iter((previous.depth, elapsed_ms), measurement.depth)
         });
         rate_algorithm_samples.push(sample);
-        current = measurement.depth;
+        previous = *measurement;
     }
 
     let mut deco_rate_samples: Vec<BenchmarkSample> = Vec::new();
@@ -956,7 +1036,13 @@ fn benchmark_dive_profile(
             delta_ms as u16
         };
         let (_, sample) = benchmarking::measure("deco.schedule.rate", || {
-            deco_update_interval_millis(measurement.depth, previous.depth, delta_ms as u32)
+            sched
+                .deco_rate
+                .next_iter(
+                    (previous.depth.to_msw(), delta_ms as u32),
+                    measurement.depth.to_msw(),
+                )
+                .unwrap()
         });
         deco_rate_samples.push(sample);
         previous = *measurement;
@@ -982,7 +1068,10 @@ fn benchmark_dive_profile(
         o2_tox_samples.push(tox_sample);
 
         let (_, rate_sample) = benchmarking::measure("o2.tox.rate", || {
-            o2tox_update_interval_millis(measurement.depth)
+            sched
+                .o2_rate
+                .next_iter(measurement.depth.to_msw(), measurement.depth.to_msw())
+                .unwrap()
         });
         o2_rate_samples.push(rate_sample);
     }
@@ -997,12 +1086,14 @@ fn benchmark_dive_profile(
         })
         .collect();
 
-    let deco_rate_decision_samples = collect_deco_rate_decision_samples(measurements, time_step_ms);
-    let o2_rate_decision_samples = collect_o2_rate_decision_samples(measurements, time_step_ms);
+    let deco_rate_decision_samples =
+        collect_deco_rate_decision_samples_with(measurements, time_step_ms, &mut sched.deco_rate);
+    let o2_rate_decision_samples =
+        collect_o2_rate_decision_samples_with(measurements, time_step_ms, &mut sched.o2_rate);
     let display_refresh_decision_samples =
         collect_display_refresh_decision_samples(measurements, time_step_ms);
 
-    let control_block = LogDiveControlDataBlock::<1>::new(
+    let control_block = LogDiveControlDataBlock::<4>::new(
         1_700_000_000,
         1_234,
         1,
@@ -1158,6 +1249,11 @@ fn generate_profile_deep(count: usize) -> (EmulatedDiveProfile, Vec<DiveMeasurem
     generate_deco_aware_profile(count, EmulatedDiveProfile::deep(), 1_000)
 }
 
+fn generate_profile_deep_long(count: usize) -> (EmulatedDiveProfile, Vec<DiveMeasurement<Pa>>) {
+    let profile = EmulatedDiveProfile::new([40, 3000, 160], msw::new(90.0).to_pa(), 0.02);
+    generate_deco_aware_profile(count, profile, 200)
+}
+
 #[test]
 fn benchmark_small_profile() {
     let (profile, measurements) = generate_profile_small(2_048);
@@ -1174,4 +1270,10 @@ fn benchmark_large_profile() {
 fn benchmark_deep_profile() {
     let (profile, measurements) = generate_profile_deep(2 * 2_048);
     benchmark_dive_profile("profile.deep", profile, 1_000, &measurements);
+}
+
+#[test]
+fn benchmark_deep_long_profile() {
+    let (profile, measurements) = generate_profile_deep_long(2 * 4_096);
+    benchmark_dive_profile("profile.deep.long", profile, 200, &measurements);
 }

@@ -3,15 +3,22 @@ use core::time::Duration;
 use rtt_target::rprintln;
 use stdc_diving_algorithms::{
     deco_algorithm::{DecoSettings, calc_deco_schedule},
+    dive::StopSchedule,
     gas::{GasMix, TissuesLoading},
     pressure_unit::{Pa, Pressure, msw},
     setup::NUM_TISSUES,
 };
 
-use stdc_stm32_rs::algorithms::profile_emulation::EmulationDecoOverlay;
+use stdc_stm32_rs::algorithms::{
+    profile_emulation::EmulationDecoStop,
+    rate_algorithm::{DecoUpdateRateAlgorithm, FixedRateAlgorithm, RateAlgorithm},
+};
 use stdc_stm32_rs::benchmarking;
 use stdc_stm32_rs::components::display::LedDisplay;
 use stdc_stm32_rs::components::spi_utils::DetailsError;
+use stdc_stm32_rs::{
+    algorithms::profile_emulation::EmulationDecoOverlay, components::display::MAX_STOP_NUMS,
+};
 
 use crate::modes::{
     display_refresh, display_set_dive_time, display_set_stop_schedule, millis_tim5,
@@ -19,13 +26,6 @@ use crate::modes::{
 };
 
 const DIVE_TIME_UPDATE_INTERVAL_MILLIS: u32 = 1_000;
-const DIVE_DECO_UPDATE_MIN_INTERVAL_MILLIS: u32 = 5_000;
-const DIVE_DECO_UPDATE_MAX_INTERVAL_MILLIS: u32 = 30_000;
-const DIVE_DECO_SPEED_REFERENCE_M_PER_S: f32 = 0.30;
-const DIVE_DECO_DEPTH_REFERENCE_M: f32 = 40.0;
-const DIVE_O2TOX_UPDATE_MIN_INTERVAL_MILLIS: u32 = 10_000;
-const DIVE_O2TOX_UPDATE_MAX_INTERVAL_MILLIS: u32 = 120_000;
-const DIVE_O2TOX_DEPTH_REFERENCE_M: f32 = 60.0;
 const DIVE_DISPLAY_REFRESH_INTERVAL_MILLIS: u32 = 250;
 
 pub struct DiveTaskState {
@@ -33,6 +33,7 @@ pub struct DiveTaskState {
     last_deco_update_millis: u32,
     last_deco_update_depth: msw,
     last_display_refresh_millis: u32,
+    display_refresh_rate_algorithm: FixedRateAlgorithm,
 }
 
 impl DiveTaskState {
@@ -42,50 +43,9 @@ impl DiveTaskState {
             last_deco_update_millis: start_millis,
             last_deco_update_depth: start_depth,
             last_display_refresh_millis: start_millis,
+            display_refresh_rate_algorithm: FixedRateAlgorithm::new(DIVE_DISPLAY_REFRESH_INTERVAL_MILLIS),
         }
     }
-}
-
-fn lerp_u32(min_value: u32, max_value: u32, factor: f32) -> u32 {
-    let factor = factor.clamp(0.0, 1.0);
-    let span = max_value.abs_diff(min_value) as f32;
-    (min_value as f32 + span * factor + 0.5) as u32
-}
-
-pub(crate) fn deco_update_interval_millis(
-    current_depth: msw,
-    previous_depth: msw,
-    elapsed_millis: u32,
-) -> u32 {
-    let depth_m = current_depth.to_f32().max(0.0);
-    let depth_factor = (depth_m / DIVE_DECO_DEPTH_REFERENCE_M).clamp(0.0, 1.0);
-    let depth_interval = lerp_u32(
-        DIVE_DECO_UPDATE_MAX_INTERVAL_MILLIS,
-        DIVE_DECO_UPDATE_MIN_INTERVAL_MILLIS,
-        depth_factor,
-    );
-
-    let depth_delta_m = (current_depth.to_f32() - previous_depth.to_f32()).abs();
-    let elapsed_seconds = (elapsed_millis.max(1) as f32) / 1000.0;
-    let speed_m_per_s = depth_delta_m / elapsed_seconds;
-    let speed_factor = (speed_m_per_s / DIVE_DECO_SPEED_REFERENCE_M_PER_S).clamp(0.0, 1.0);
-    let speed_interval = lerp_u32(
-        DIVE_DECO_UPDATE_MAX_INTERVAL_MILLIS,
-        DIVE_DECO_UPDATE_MIN_INTERVAL_MILLIS,
-        speed_factor,
-    );
-
-    depth_interval.min(speed_interval)
-}
-
-pub(crate) fn o2tox_update_interval_millis(current_depth: msw) -> u32 {
-    let depth_m = current_depth.to_f32().max(0.0);
-    let depth_factor = (depth_m / DIVE_O2TOX_DEPTH_REFERENCE_M).clamp(0.0, 1.0);
-    lerp_u32(
-        DIVE_O2TOX_UPDATE_MAX_INTERVAL_MILLIS,
-        DIVE_O2TOX_UPDATE_MIN_INTERVAL_MILLIS,
-        depth_factor,
-    )
 }
 
 pub fn update_dive_time_if_due(state: &mut DiveTaskState, dive_start_millis: u32) -> bool {
@@ -110,6 +70,7 @@ pub fn update_deco_schedule_if_due<const NUM_GASES: usize>(
     gases: &[GasMix<f32>; NUM_GASES],
     gases_enabled: &[bool; NUM_GASES],
     deco_settings: &DecoSettings<Pa>,
+    deco_rate_algorithm: &mut DecoUpdateRateAlgorithm,
 ) -> Option<EmulationDecoOverlay>
 where
     [(); NUM_GASES * 3]: Sized,
@@ -121,9 +82,23 @@ where
 {
     let elapsed_millis = current_millis.wrapping_sub(state.last_deco_update_millis);
     let next_interval = benchmarking::measure_and_log("dive.deco_schedule.rate", || {
-        deco_update_interval_millis(current_depth, state.last_deco_update_depth, elapsed_millis)
+        deco_rate_algorithm
+            .next_iter(
+                (state.last_deco_update_depth, elapsed_millis),
+                current_depth,
+            )
+            .unwrap()
     });
+    // rprintln!("Next interval: {:?}", next_interval);
+    // rprintln!("Elapsed Milli: {:?}", elapsed_millis);
     if elapsed_millis < next_interval {
+        rprintln!(
+            "Deco overlay not due yet: elapsed={}ms next={}ms current_depth={:?} last_depth={:?}",
+            elapsed_millis,
+            next_interval,
+            current_depth,
+            state.last_deco_update_depth
+        );
         #[cfg(feature = "online_benchmarking")]
         benchmarking::log_decision(
             "dive.deco_schedule.rate",
@@ -136,33 +111,59 @@ where
     state.last_deco_update_millis = current_millis;
     state.last_deco_update_depth = current_depth;
 
-    let result = benchmarking::measure_and_log("dive.deco_schedule", || {
-        calc_deco_schedule(loading, gases, gases_enabled, deco_settings)
-    });
+    let result: Result<StopSchedule<{ MAX_STOP_NUMS }>, _> =
+        benchmarking::measure_and_log("dive.deco_schedule", || {
+            calc_deco_schedule(loading, gases, gases_enabled, deco_settings)
+        });
 
     match result {
         Ok(stops) => {
-            let overlay = stops
-                .first_stop()
-                .map(|stop| {
-                    let hold_time = stops
-                        .get_deco_tts(&stdc_diving_algorithms::dive::get_ascent_rate_per_meter(9));
-                    let hold_samples =
-                        hold_time.as_millis().saturating_add(999).div_euclid(1_000) as usize;
-                    EmulationDecoOverlay {
-                        stop_depth_pa: stop.depth().to_pa().to_f32(),
-                        hold_samples: hold_samples.max(1),
-                    }
-                })
-                .or(Some(EmulationDecoOverlay {
-                    stop_depth_pa: 0.0,
-                    hold_samples: 0,
-                }));
+            let first_stop = stops.first_stop();
+            let last_stop = stops
+                .stops()
+                .iter()
+                .rev()
+                .find(|stop| stop.duration().as_millis() > 0);
+            rprintln!("First stop (deepest): {:?}", first_stop);
+            rprintln!("Last used stop (shallowest): {:?}", last_stop);
+            let mut overlay = EmulationDecoOverlay {
+                stops: [EmulationDecoStop::none(); MAX_STOP_NUMS],
+                count: 0,
+            };
+            for stop in stops
+                .stops()
+                .iter()
+                .filter(|stop| stop.duration().as_millis() > 0)
+                .take(MAX_STOP_NUMS)
+            {
+                let hold_samples = stop
+                    .duration()
+                    .as_millis()
+                    .saturating_add(999)
+                    .div_euclid(1_000) as usize;
+                overlay.stops[overlay.count] = EmulationDecoStop {
+                    stop_depth_pa: stop.depth().to_pa(),
+                    hold_samples: hold_samples.max(1),
+                    start_sample: None,
+                };
+                overlay.count += 1;
+            }
             display_set_stop_schedule(stops);
-            rprintln!("Dive deco schedule updated");
+            rprintln!("----------");
+            rprintln!(
+                "Dive deco schedule updated: count={}, first_stop={:?}, last_stop={:?}",
+                overlay.count,
+                overlay.stops.first().copied(),
+                if overlay.count == 0 {
+                    None
+                } else {
+                    overlay.stops.get(overlay.count - 1).copied()
+                }
+            );
+            rprintln!("----------");
             #[cfg(feature = "online_benchmarking")]
             benchmarking::log_decision("dive.deco_schedule.rate", true, None);
-            overlay
+            Some(overlay)
         }
         Err(err) => {
             rprintln!("Got error while calculating deco schedule: {:?}.", err);
@@ -172,7 +173,21 @@ where
 }
 
 pub fn refresh_display_if_due<D: LedDisplay>(state: &mut DiveTaskState, display: &mut D) -> bool {
-    if millis_tim5_since(state.last_display_refresh_millis) < DIVE_DISPLAY_REFRESH_INTERVAL_MILLIS {
+    let elapsed_millis = millis_tim5_since(state.last_display_refresh_millis);
+    let next_interval = benchmarking::measure_and_log("dive.display_refresh.rate", || {
+        state
+            .display_refresh_rate_algorithm
+            .next_iter((), elapsed_millis)
+            .unwrap()
+    });
+
+    if elapsed_millis < next_interval {
+        #[cfg(feature = "online_benchmarking")]
+        benchmarking::log_decision(
+            "dive.display_refresh.rate",
+            false,
+            Some(next_interval - elapsed_millis),
+        );
         return false;
     }
 
@@ -181,7 +196,11 @@ pub fn refresh_display_if_due<D: LedDisplay>(state: &mut DiveTaskState, display:
     let result = benchmarking::measure_and_log("dive.display_refresh", || display_refresh(display));
 
     match result {
-        Ok(_) => true,
+        Ok(_) => {
+            #[cfg(feature = "online_benchmarking")]
+            benchmarking::log_decision("dive.display_refresh.rate", true, None);
+            true
+        }
         Err(e) => {
             rprintln!("Failed refreshing display.");
             rprintln!("Display error details: {:?}", e.details());

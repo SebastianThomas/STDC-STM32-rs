@@ -32,10 +32,11 @@ use stm32l4xx_hal::{
     spi::Spi,
 };
 
+#[cfg(feature = "live_sim")]
+use stdc_stm32_rs::components::LiveSimEmulationControl;
 use stdc_stm32_rs::{
     benchmarking,
     components::{
-        MS5849,
         battery_status::{BatteryStatusI2C, Max17262Variant},
         display::*,
         flash::{Flash, SpiFlash},
@@ -95,19 +96,9 @@ const BLUETOOTH_TASK_DELAY_MILLIS: u64 = 200;
 #[cfg(not(feature = "online_benchmarking"))]
 const STOP2_SURFACE_SLEEP_SECONDS: u32 = 2;
 
-#[allow(unused)]
-const NX100: GasMix<f32> = match GasMix::new(0.99, 0.0) {
-    Ok(g) => g,
-    Err(_) => unreachable!(),
-};
-#[allow(unused)]
-const NX50: GasMix<f32> = match GasMix::new(0.50, 0.000_005_2) {
-    Ok(g) => g,
-    Err(_) => unreachable!(),
-};
-const NR_GASES: usize = 2;
-const GASES: [GasMix<f32>; NR_GASES] = [gas::AIR, NX50];
-const GASES_ENABLED: [bool; NR_GASES] = [true, true];
+const NR_GASES: usize = 4;
+const GASES: [GasMix<f32>; NR_GASES] = [gas::AIR, gas::NX100, gas::NX50, gas::TMX10_80];
+const GASES_ENABLED: [bool; NR_GASES] = [true; 4];
 
 static POWER_CUT_RED_INDICATOR: CmMutex<RefCell<Option<Pc9Output>>> =
     CmMutex::new(RefCell::new(None));
@@ -398,6 +389,9 @@ mod app {
             i2c::Config::new(100.kHz(), clocks),
             &mut apb1r1,
         );
+        #[cfg(feature = "live_sim")]
+        let mut ms5849_i2c: SensorMs5849 = create_pressure_sensor(sensor_i2c);
+        #[cfg(not(feature = "live_sim"))]
         let ms5849_i2c: SensorMs5849 = create_pressure_sensor(sensor_i2c);
 
         rprintln!("Pressure Sensor set up");
@@ -418,6 +412,8 @@ mod app {
                 DEFAULT_SURFACE_PRESSURE
             }
         };
+        #[cfg(feature = "live_sim")]
+        ms5849_i2c.enter_live_sim(start_surface_pressure);
 
         let mut scl = gpioc.pc0.into_alternate_open_drain(
             &mut gpioc.moder,
@@ -656,6 +652,8 @@ mod app {
         DirectContinue,
         Delay(Duration<u64, 1, { TIM2_MONO_CLOCK }>),
         DelayUntil(Duration<u64, 1, { TIM2_MONO_CLOCK }>),
+        #[cfg(feature = "live_sim")]
+        HaltMCU(bool),
     }
 
     #[task(priority = 1, shared = [latest_measurements, clocks, apb1r1, flash], local = [
@@ -672,11 +670,6 @@ mod app {
     async fn task_mode_tick(mut cx: task_mode_tick::Context) {
         loop {
             let iteration_start = Mono::now();
-            
-            modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
-            sync_power_cut_indicator();
-            sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
-            rprintln!("Task Mode Tick in mode: {:?}", cx.local.mode);
 
             modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
             sync_power_cut_indicator();
@@ -716,11 +709,12 @@ mod app {
                                 );
                             });
                         }
-
                         match surface_exit {
                             Some(SurfaceModeExit::Dive(surface_pressure)) => {
                                 *cx.local.mode_surface_pressure = surface_pressure;
                                 *cx.local.mode = AppMode::Dive;
+                                #[cfg(feature = "live_sim")]
+                                cx.local.ms5849_i2c.enter_live_sim(surface_pressure);
                                 *cx.local.dive_runtime = Some(cx.shared.flash.lock(|flash| {
                                     modes::dive::setup_dive_mode(
                                         flash,
@@ -783,20 +777,24 @@ mod app {
                         }
 
                         if let Some(surface_pressure) = dive_exit {
+                            #[cfg(feature = "live_sim")]
+                            let is_benchmark_profile = runtime.is_benchmark_profile;
+
                             *cx.local.mode_surface_pressure = surface_pressure;
-                            #[cfg(feature = "online_benchmarking")]
-                            {
-                                if runtime.is_benchmark_profile {
-                                    rprintln!("Benchmark dive completed; stopping MCU");
-                                    crate::runtime::board::stop_mcu_after_benchmark();
-                                    unreachable!("MCU should be stopped after benchmarking sim finished")
-                                }
-                            }
                             *cx.local.dive_runtime = None;
+
+                            #[cfg(feature = "live_sim")]
+                            cx.local.ms5849_i2c.exit_live_sim();
+
                             transition_into_surface(cx.local.mode, cx.local.surface_mode_state);
-                            TaskModeTickResult::DirectContinue
+                            sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
+
+                            #[cfg(feature = "live_sim")]
+                            return TaskModeTickResult::HaltMCU(is_benchmark_profile);
+                            #[cfg(not(feature = "live_sim"))]
+                            return TaskModeTickResult::DirectContinue;
                         } else {
-                            TaskModeTickResult::DelayUntil(500_u64.millis())
+                            TaskModeTickResult::DelayUntil(200_u64.millis())
                         }
                     }
                 }
@@ -804,16 +802,16 @@ mod app {
             .await;
             rprintln!("Completed Task Mode Tick");
             modes::power_cut_mark_safe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
-                match result {
-                    TaskModeTickResult::DirectContinue => {}
-                    TaskModeTickResult::Delay(duration) => {
-                        Mono::delay(duration).await;
-                    }
-                    TaskModeTickResult::DelayUntil(duration) => {
-                        let target = iteration_start + duration;
-                        Mono::delay_until(target).await;
-                    }
-                    TaskModeTickResult::EnterStop2 => {
+            match result {
+                TaskModeTickResult::DirectContinue => {}
+                TaskModeTickResult::Delay(duration) => {
+                    Mono::delay(duration).await;
+                }
+                TaskModeTickResult::DelayUntil(duration) => {
+                    let target = iteration_start + duration;
+                    Mono::delay_until(target).await;
+                }
+                TaskModeTickResult::EnterStop2 => {
                     rprintln!("Going to sleep");
                     #[cfg(not(feature = "online_benchmarking"))]
                     {
@@ -822,6 +820,13 @@ mod app {
                     }
                     #[cfg(feature = "online_benchmarking")]
                     Mono::delay(1000u64.millis()).await;
+                }
+                #[cfg(feature = "online_benchmarking")]
+                TaskModeTickResult::HaltMCU(is_benchmark_profile) => {
+                    if is_benchmark_profile {
+                        rprintln!("Benchmark dive completed; stopping MCU");
+                        crate::runtime::board::stop_mcu_after_benchmark();
+                    }
                 }
             }
             Mono::delay(1u64.millis()).await;

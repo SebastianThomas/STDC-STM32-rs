@@ -8,6 +8,8 @@ use stm32l4xx_hal::hal::blocking::spi;
 
 use stdc_diving_algorithms::pressure_unit::{Bar, Pa, Pressure, mBar, msw};
 
+#[cfg(feature = "live_sim")]
+use crate::algorithms::profile_emulation::EmulatedDiveProfile;
 use crate::constants::barometric::{
     ALT_PER_FOOT, DepthOrAltitude, FEET_TO_METERS, KG_M2_FRESH_WATER, RLGM, SURFACE_PA,
 };
@@ -44,6 +46,16 @@ pub struct SensorConfiguration {
     pub fluid_density: u16,
     /** g/l * m / s^2 */
     pub fluid_density_10m: f32,
+}
+
+use crate::algorithms::profile_emulation::EmulationDecoOverlay;
+
+pub trait LiveSimEmulationControl {
+    fn enter_live_sim(&mut self, _surface_pressure: Pa) {}
+
+    fn exit_live_sim(&mut self) {}
+
+    fn sync_live_sim_dive_overlay(&mut self, _overlay: EmulationDecoOverlay) {}
 }
 
 impl SensorConfiguration {
@@ -353,17 +365,16 @@ impl<I, P> MS5849<I, P> {
 
     pub fn depth_relative_or_altitude(
         &self,
+        pressure: Option<Pa>,
         surf_ref: Pa,
     ) -> Result<DepthOrAltitude, (Option<Pa>, &str)> {
-        let pressure = match self.pressure() {
+        let pressure = match pressure {
             Some(p) => p,
             None => return Err((None, "No pressure")),
         };
-        // TODO: Allow slight difference
         const SUBMERGED_DIFF: Pa = mBar::new(50.0).to_pa(); // half a meter
         let is_submerged = pressure - surf_ref > SUBMERGED_DIFF;
         if is_submerged {
-            rprintln!("Is submerged");
             let pressure_below = pressure - surf_ref;
             let depth: f32 = (pressure_below / self.config.fluid_density_10m).to_f32();
             return Ok(DepthOrAltitude::Depth {
@@ -412,5 +423,89 @@ impl<I, P> MS5849<I, P> {
         }
 
         Self::crc8_update((prom[15] >> 8) as u8, crc)
+    }
+}
+
+#[cfg(feature = "live_sim")]
+pub struct LiveSimMS5849<INTERFACE, P> {
+    sensor: MS5849<INTERFACE, P>,
+    surf_ref: Pa,
+    emulated_profile: EmulatedDiveProfile,
+    emulation_active: bool,
+    emulation_sample_index: usize,
+}
+
+#[cfg(feature = "live_sim")]
+impl<I: Write + Read + WriteRead> LiveSimMS5849<I, ()>
+where
+    <I as Read>::Error: Debug,
+    <I as Write>::Error: Debug,
+    <I as WriteRead>::Error: Debug,
+{
+    pub async fn new_i2c(i2c: I) -> Self {
+        let sensor = MS5849::new_i2c(i2c).await;
+        let surf_ref = sensor
+            .pressure()
+            .expect("Only for benchmarking, should always be initialized");
+        Self {
+            sensor,
+            surf_ref,
+            emulated_profile: EmulatedDiveProfile::deep_with_defaults(1_000),
+            emulation_active: false,
+            emulation_sample_index: 0,
+        }
+    }
+
+    pub async fn read_i2c(&mut self) {
+        self.sensor.read_i2c().await;
+    }
+
+    pub fn current_pressure_pa(&self) -> Option<Pa> {
+        self.sensor.current_pressure_pa()
+    }
+
+    pub fn temperature(&self) -> Option<f32> {
+        self.sensor.temperature()
+    }
+
+    pub fn depth_relative_or_altitude(
+        &mut self,
+        pressure: Option<Pa>,
+        surf_ref: Pa,
+    ) -> Result<DepthOrAltitude, (Option<Pa>, &str)> {
+        self.sensor.depth_relative_or_altitude(pressure, surf_ref)
+    }
+
+    pub fn pressure(&mut self) -> Option<Pa> {
+        if !self.emulation_active {
+            return self.sensor.pressure();
+        }
+        let emulated_point =
+            self.emulated_profile
+                .point_at(self.surf_ref, 1_000, self.emulation_sample_index);
+        self.emulation_sample_index = self.emulation_sample_index.wrapping_add(1);
+        Some(emulated_point.depth_pa)
+    }
+}
+
+#[cfg(feature = "live_sim")]
+impl<I, P> LiveSimEmulationControl for LiveSimMS5849<I, P> {
+    fn enter_live_sim(&mut self, _surface_pressure: Pa) {
+        self.emulated_profile = EmulatedDiveProfile::deep_with_defaults(1_000);
+        self.emulation_active = true;
+        self.emulation_sample_index = 0;
+    }
+
+    fn exit_live_sim(&mut self) {
+        self.emulation_active = false;
+        self.emulation_sample_index = 0;
+    }
+
+    fn sync_live_sim_dive_overlay(&mut self, overlay: EmulationDecoOverlay) {
+        if overlay.count == 0 {
+            self.emulated_profile = self.emulated_profile.without_deco_overlay();
+        } else {
+            self.emulated_profile = self.emulated_profile.with_deco_overlay_obj(overlay);
+        }
     }
 }

@@ -1,6 +1,6 @@
 use stdc_diving_algorithms::{
-    deco_algorithm::{DecoSettings, calc_deco_schedule},
-    dive::{DiveMeasurement, get_ascent_rate_per_meter},
+    deco_algorithm::{DecoSettings, MVALUES, TISSUES, calc_deco_schedule, update_model_state},
+    dive::DiveMeasurement,
     gas::{
         AIR, GasDensitySettings, GasMix, MAX_GAS_DENSITY, NX50, NX100, TMX10_80, TissuesLoading,
     },
@@ -22,6 +22,7 @@ use crate::{
 };
 
 const DIVE_DISPLAY_REFRESH_INTERVAL_MILLIS: u32 = 250;
+const BENCHMARK_DECO_MAX_STOPS: usize = 31;
 
 use std::sync::Mutex;
 use std::vec::Vec;
@@ -456,8 +457,7 @@ const MIN_WINDOW_SAMPLE_COUNT: usize = 30;
 
 #[derive(Clone, Copy)]
 struct DecoOverlayInfo {
-    stop_depth_pa: f32,
-    hold_samples: usize,
+    overlay: EmulationDecoOverlay,
 }
 
 fn generate_emulated_profile(
@@ -527,49 +527,61 @@ where
                 measurement.depth.to_f32()
             );
         }
-        loading.tick(delta_ms, measurement.depth, &AIR);
+        let delta_time = core::time::Duration::from_millis(delta_ms as u64);
+        let midpoint = (measurement.depth + previous.depth) / 2.0;
+        update_model_state(
+            &mut loading,
+            &TISSUES,
+            &MVALUES,
+            &AIR,
+            midpoint,
+            &delta_time,
+        );
         previous = *measurement;
     }
 
-    let schedule =
-        match calc_deco_schedule::<16, NUM_GASES>(&loading, gases, gases_enabled, deco_settings) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("calc_deco_schedule returned error: {}", e);
-                return None;
-            }
+    let schedule = match calc_deco_schedule::<BENCHMARK_DECO_MAX_STOPS, NUM_GASES>(
+        &loading,
+        gases,
+        gases_enabled,
+        deco_settings,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("calc_deco_schedule returned error: {}", e);
+            return None;
+        }
+    };
+
+    let mut overlay = EmulationDecoOverlay {
+        stops: [crate::algorithms::profile_emulation::EmulationDecoStop::none(); BENCHMARK_DECO_MAX_STOPS],
+        count: 0,
+    };
+    for stop in schedule
+        .stops()
+        .iter()
+        .filter(|stop| stop.duration().as_millis() > 0)
+        .take(BENCHMARK_DECO_MAX_STOPS)
+    {
+        let hold_samples = stop
+            .duration()
+            .as_millis()
+            .saturating_add(time_step_ms as u128 - 1)
+            .div_euclid(time_step_ms as u128) as usize;
+        overlay.stops[overlay.count] = crate::algorithms::profile_emulation::EmulationDecoStop {
+            stop_depth_pa: stop.depth().to_pa(),
+            hold_samples: hold_samples.max(1),
+            start_sample: None,
         };
-    eprintln!("calc_deco_schedule returned schedule: {:?}", schedule);
-    eprintln!("first_stop: {:?}", schedule.first_stop());
-    // Debug: print a few tissue loadings and m-values to diagnose why no stop was selected
-    use stdc_diving_algorithms::deco_algorithm::MVALUES;
-    eprintln!(
-        "loading.n2[0..4]: {:?}",
-        [
-            loading.n2[0].to_f32(),
-            loading.n2[1].to_f32(),
-            loading.n2[2].to_f32(),
-            loading.n2[3].to_f32(),
-        ]
-    );
-    eprintln!(
-        "MVALUES[0].max_saturation[0..3]: {:?}",
-        [
-            MVALUES[0].max_saturation[0].to_f32(),
-            MVALUES[0].max_saturation[1].to_f32(),
-            MVALUES[0].max_saturation[2].to_f32(),
-        ]
-    );
-    let first_stop = schedule.first_stop()?;
-    let hold_time = schedule.get_deco_tts(&get_ascent_rate_per_meter(9));
-    let hold_samples = hold_time
-        .as_millis()
-        .saturating_add(time_step_ms as u128 - 1)
-        .div_euclid(time_step_ms as u128) as usize;
+        overlay.count += 1;
+    }
+
+    if overlay.count == 0 {
+        return None;
+    }
 
     Some(DecoOverlayInfo {
-        stop_depth_pa: first_stop.depth().to_pa().to_f32(),
-        hold_samples: hold_samples.max(1),
+        overlay,
     })
 }
 
@@ -578,6 +590,7 @@ fn generate_deco_aware_profile(
     profile: EmulatedDiveProfile,
     time_step_ms: u32,
 ) -> (EmulatedDiveProfile, Vec<DiveMeasurement<Pa>>) {
+    let profile = profile.with_sample_interval_ms(time_step_ms);
     let gases = [AIR, NX100, NX50, TMX10_80];
     let gases_enabled = [true; 4];
     let deco_settings = DecoSettings {
@@ -585,6 +598,9 @@ fn generate_deco_aware_profile(
             limit_g_l: MAX_GAS_DENSITY,
         },
         max_deco_po2: Bar::new(1.6).to_pa(),
+        gf_high: 0.50,
+        gf_low: 0.85,
+        ignore_icd: false,
     };
 
     let base = generate_emulated_profile(count, profile, time_step_ms);
@@ -594,8 +610,7 @@ fn generate_deco_aware_profile(
         return (profile, base);
     };
 
-    let realized_profile =
-        profile.with_deco_overlay(Pa::new(overlay.stop_depth_pa), overlay.hold_samples);
+    let realized_profile = profile.with_deco_overlay_obj(overlay.overlay);
     let realized_measurements = generate_emulated_profile(count, realized_profile, time_step_ms);
     (realized_profile, realized_measurements)
 }
@@ -929,6 +944,9 @@ fn benchmark_dive_profile(
             limit_g_l: MAX_GAS_DENSITY,
         },
         max_deco_po2: Bar::new(1.6).to_pa(),
+        gf_high: 0.50,
+        gf_low: 0.85,
+        ignore_icd: false,
     };
 
     let mut sched = SchedulerSet::new();
@@ -966,7 +984,12 @@ fn benchmark_dive_profile(
             loading_samples.push(loading_sample);
 
             let (_, deco_sample) = benchmarking::measure("deco.schedule.window", || {
-                calc_deco_schedule::<16, 4>(&loading, &gases, &gases_enabled, &deco_settings)
+                let _ = calc_deco_schedule::<BENCHMARK_DECO_MAX_STOPS, 4>(
+                    &loading,
+                    &gases,
+                    &gases_enabled,
+                    &deco_settings,
+                );
             });
             deco_samples.push(deco_sample);
 

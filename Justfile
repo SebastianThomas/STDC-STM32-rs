@@ -80,15 +80,8 @@ embed-bench-log:
 	echo "tables dir: ${raw_log%.log}.tables"
 
 embed-live-sim-log:
-	mkdir -p target
-	raw_log=target/rtt-live-sim-$(date +%Y%m%d-%H%M%S).log; \
-	clean_log=${raw_log%.log}.clean.log; \
-	NO_COLOR=1 CARGO_TERM_COLOR=never just features=online_benchmarking,live_sim embed-no-progress 2>&1 | tee "$raw_log" || true; \
-	perl -pe 's/\r\n?/\n/g; s/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\e\][^\a]*(?:\a|\e\\)//g; s/\e[@-_]//g' "$raw_log" > "$clean_log"; \
-	python3 scripts/extract_bench_tables.py "$raw_log"; \
-	echo "raw log: $raw_log"; \
-	echo "clean log: $clean_log"; \
-	echo "tables dir: ${raw_log%.log}.tables"
+	# Keep the log-processing step alive even if cargo embed is interrupted with Ctrl-C.
+	NO_COLOR=1 CARGO_TERM_COLOR=never JUST_EMBED_FEATURES=online_benchmarking,live_sim bash scripts/embed_live_sim_log.sh
 	
 ci:
 	just c

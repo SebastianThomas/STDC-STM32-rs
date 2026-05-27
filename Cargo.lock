@@ -600,8 +600,8 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stdc_diving_algorithms"
-version = "0.1.25"
-source = "git+https://github.com/SebastianThomas/STDC-thalmann.git#b74a35967c0a8b38b4f553dda918d7d0acf4622a"
+version = "0.1.27"
+source = "git+https://github.com/SebastianThomas/STDC-thalmann.git#7eb7d137e4aa613ff4be8af732e2afcad7a445c7"
 dependencies = [
  "num",
 ]

@@ -44,7 +44,7 @@ impl<const WINDOW: usize> DiffAimdRateAlgorithm<WINDOW> {
             current_window_size: 0,
             next_window_insert_index: 0,
             change_rate_reference_per_s,
-            change_detection_threshold_ratio: 0.25,
+            change_detection_threshold_ratio: 0.15,
             min_value,
             max_value,
         }
@@ -81,6 +81,7 @@ impl<const WINDOW: usize> DiffAimdRateAlgorithm<WINDOW> {
         let diff_per_s = (instance - oldest).abs() / elapsed_seconds;
         let speed_factor = (diff_per_s / self.change_rate_reference_per_s).clamp(0.0, 1.0);
         let change_by_diff = speed_factor > self.change_detection_threshold_ratio;
+        
         let change = change_by_diff || force_change_signal;
 
         let interval = self.aimd.next_iter(change).unwrap_or(self.max_value);

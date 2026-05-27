@@ -45,12 +45,16 @@ const DISPLAY_TITLE: &[u8] = b"STDC";
 
 const STATUS_SCALE: u8 = 2;
 const STATUS_Y: u8 = 2;
-const STATUS_AREA_HEIGHT: u8 = FONT_HEIGHT * STATUS_SCALE + 4;
 const STATUS_PADDING: u8 = 2;
 const STATUS_LEFT_X: u8 = 0;
 const STATUS_LEFT_W: u8 = SSD1353_WIDTH / 2;
 const STATUS_RIGHT_X: u8 = SSD1353_WIDTH / 2;
 const STATUS_RIGHT_W: u8 = SSD1353_WIDTH - STATUS_RIGHT_X;
+
+fn max_chars_for_width(max_width: u8, scale: u8) -> usize {
+    let char_advance = (FONT_WIDTH + FONT_SPACING) as u16 * scale as u16;
+    (max_width as u16 / char_advance) as usize
+}
 
 fn append_u32_ascii(mut value: u32, out: &mut [u8], offset: &mut usize) {
     if *offset >= out.len() {
@@ -283,7 +287,7 @@ where
         while remaining > 0 {
             let pixels_this_round = if remaining > 32 { 32 } else { remaining };
             let bytes = pixels_this_round * 2;
-            self.write_data(&chunk[..bytes])?;
+            self.write_data_raw(&chunk[..bytes])?;
             remaining -= pixels_this_round;
         }
 
@@ -325,7 +329,7 @@ where
         }
 
         for _ in 0..height {
-            self.write_data(&row[..row_bytes])?;
+            self.write_data_raw(&row[..row_bytes])?;
         }
 
         Ok(())
@@ -368,7 +372,7 @@ where
                         offset += 2;
                     }
                 }
-                self.write_data(&row[..row_bytes])?;
+                self.write_data_raw(&row[..row_bytes])?;
             }
         }
 
@@ -428,6 +432,33 @@ where
         Ok(())
     }
 
+    fn draw_status_text_padded(
+        &mut self,
+        x: u8,
+        y: u8,
+        text: &[u8],
+        prev_len: usize,
+        scale: u8,
+        color: u16,
+        max_width: u8,
+    ) -> Result<(), SpiError> {
+        let max_chars = max_chars_for_width(max_width, scale);
+        if max_chars == 0 {
+            return Ok(());
+        }
+
+        let draw_len = core::cmp::max(prev_len, text.len()).min(max_chars);
+        if draw_len == 0 {
+            return Ok(());
+        }
+
+        let mut draw_buf = [b' '; 16];
+        let copy_len = text.len().min(draw_len).min(draw_buf.len());
+        draw_buf[..copy_len].copy_from_slice(&text[..copy_len]);
+
+        self.draw_scaled_text_at(x, y, &draw_buf[..draw_len], scale, color, max_width)
+    }
+
     pub fn ssd1353_show_depth_and_dive_time(
         &mut self,
         state: &DisplayState,
@@ -437,21 +468,17 @@ where
         let depth_len = format_depth_text(state.depth, &mut depth_label);
         let time_len = format_dive_time_text(state.dive_time, &mut time_label);
 
+        let prev_depth_len = self.depth_cache_len();
+        let prev_time_len = self.time_cache_len();
         let depth_changed = self.update_depth_cache(&depth_label[..depth_len]);
         let time_changed = self.update_time_cache(&time_label[..time_len]);
 
         if depth_changed {
-            self.ssd1353_fill_rect(
-                STATUS_LEFT_X,
-                0,
-                STATUS_LEFT_W,
-                STATUS_AREA_HEIGHT,
-                COLOR_BLACK,
-            )?;
-            self.draw_scaled_text_at(
+            self.draw_status_text_padded(
                 STATUS_LEFT_X + STATUS_PADDING,
                 STATUS_Y,
                 &depth_label[..depth_len],
+                prev_depth_len,
                 STATUS_SCALE,
                 COLOR_SUBTITLE,
                 STATUS_LEFT_W - STATUS_PADDING * 2,
@@ -459,30 +486,11 @@ where
         }
 
         if time_changed {
-            self.ssd1353_fill_rect(
-                STATUS_RIGHT_X,
-                0,
-                STATUS_RIGHT_W,
-                STATUS_AREA_HEIGHT,
-                COLOR_BLACK,
-            )?;
-
-            let time_draw_len = time_len.min(
-                (STATUS_RIGHT_W as u16 / ((FONT_WIDTH + FONT_SPACING) as u16 * STATUS_SCALE as u16))
-                    as usize,
-            );
-            let time_width = measure_text_width(time_draw_len, STATUS_SCALE);
-            let max_x = STATUS_RIGHT_X as u16 + STATUS_RIGHT_W as u16 - STATUS_PADDING as u16;
-            let start_x = if time_width + STATUS_PADDING as u16 > STATUS_RIGHT_W as u16 {
-                STATUS_RIGHT_X
-            } else {
-                (max_x - time_width) as u8
-            };
-
-            self.draw_scaled_text_at(
-                start_x,
+            self.draw_status_text_padded(
+                STATUS_RIGHT_X + STATUS_PADDING,
                 STATUS_Y,
                 &time_label[..time_len],
+                prev_time_len,
                 STATUS_SCALE,
                 COLOR_SUBTITLE,
                 STATUS_RIGHT_W - STATUS_PADDING * 2,

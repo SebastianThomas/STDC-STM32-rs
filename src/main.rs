@@ -88,7 +88,9 @@ pub use runtime::board::{enter_stop2_for_surface, reinit_after_stop2};
 static SERIAL_NUMBER: [u8; 4] = [0, 0, 0, 0];
 static BLUETOOTH_NAME: [u8; 8] = concat_any_bytes!(b"STDC", SERIAL_NUMBER);
 
-const INITIAL_FLASH_ADDRESS: u32 = 1 << 21;
+const FLASH_LOG_POINTER_ADDRESS: u32 = 1 << 21;
+const FLASH_LOG_DATA_START_ADDRESS: u32 = FLASH_LOG_POINTER_ADDRESS + 4;
+const FLASH_CAPACITY_BYTES: u32 = 1 << 22;
 const BATTERY_UPDATE_INTERVAL_MILLIS: u32 = 30_000;
 #[allow(unused)]
 const BLUETOOTH_TASK_DELAY_MILLIS: u64 = 200;
@@ -103,6 +105,23 @@ const GASES_ENABLED: [bool; NR_GASES] = [true; 4];
 static POWER_CUT_RED_INDICATOR: CmMutex<RefCell<Option<Pc9Output>>> =
     CmMutex::new(RefCell::new(None));
 static BLUETOOTH_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn persist_flash_log_position(
+    flash: &mut FlashDevice,
+    next_pos: u32,
+) -> Result<(), stdc_stm32_rs::components::spi_utils::SpiError> {
+    if !(FLASH_LOG_DATA_START_ADDRESS..=FLASH_CAPACITY_BYTES).contains(&next_pos) {
+        return Err(stdc_stm32_rs::components::spi_utils::SpiError::new(
+            0,
+            "Flash log position out of range",
+        ));
+    }
+
+    flash.set_pos(FLASH_LOG_POINTER_ADDRESS)?;
+    flash.write(&next_pos.to_be_bytes())?;
+    flash.set_pos(next_pos)?;
+    Ok(())
+}
 
 #[rtic::app(device = stm32l4xx_hal::pac, peripherals = true, dispatchers = [EXTI0])]
 mod app {
@@ -343,28 +362,41 @@ mod app {
         rprintln!("Flash Device set up");
 
         let cur_addr = flash
-            .read::<4>(INITIAL_FLASH_ADDRESS)
+            .read::<4>(FLASH_LOG_POINTER_ADDRESS)
             .map(u32::from_be_bytes);
         rprintln!("Flash initial address read complete: {:?}", cur_addr);
         match cur_addr {
-            Err(_) | Ok(0) | Ok(u32::MAX) => {
-                let new_pos = INITIAL_FLASH_ADDRESS + 4;
+            Ok(pos) if (FLASH_LOG_DATA_START_ADDRESS..=FLASH_CAPACITY_BYTES).contains(&pos) => {
+                rprintln!("Current Flash Address: {}", pos);
+                rprintln!("Check: {}", pos - FLASH_LOG_POINTER_ADDRESS);
+                let _ = flash.set_pos(pos);
+            }
+            Ok(pos) => {
+                let new_pos = FLASH_LOG_DATA_START_ADDRESS;
                 rprintln!("Initial flash address invalid, resetting to {:?}", new_pos);
+                rprintln!("Invalid persisted position was {:?}", pos);
                 let _ = modes::flash_write_and_measure("flash.init.reset_pos", || {
-                    let _ = flash.write(&new_pos.to_be_bytes());
-                    let _ = flash.set_pos(new_pos);
+                    persist_flash_log_position(&mut flash, new_pos)
                 });
             }
-            Ok(_) => {
-                let cur_addr = cur_addr.unwrap();
-                rprintln!("Current Flash Address: {}", cur_addr);
-                rprintln!("Check: {}", cur_addr - (1 << 21));
-                let _ = flash.set_pos(cur_addr);
+            Err(e) => {
+                let new_pos = FLASH_LOG_DATA_START_ADDRESS;
+                rprintln!("Initial flash address invalid, resetting to {:?}", new_pos);
+                rprintln!("Reading persisted position failed: {:?}", e);
+                let _ = modes::flash_write_and_measure("flash.init.reset_pos", || {
+                    persist_flash_log_position(&mut flash, new_pos)
+                });
             }
         }
         sync_power_cut_indicator();
-        let _ =
+        let serial_write_start =
             modes::flash_write_and_measure("flash.serial.write", || flash.write(&SERIAL_NUMBER));
+        if let Ok(start) = serial_write_start {
+            let next_pos = start + SERIAL_NUMBER.len() as u32;
+            let _ = modes::flash_write_and_measure("flash.serial.persist_pos", || {
+                persist_flash_log_position(&mut flash, next_pos)
+            });
+        }
         sync_power_cut_indicator();
 
         rprintln!("Flash write complete");
@@ -800,7 +832,6 @@ mod app {
                 }
             })
             .await;
-            rprintln!("Completed Task Mode Tick");
             modes::power_cut_mark_safe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
             match result {
                 TaskModeTickResult::DirectContinue => {}

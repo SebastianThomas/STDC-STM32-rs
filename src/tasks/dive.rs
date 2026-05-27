@@ -58,7 +58,6 @@ pub fn update_dive_time_if_due(state: &mut DiveTaskState, dive_start_millis: u32
         Duration::from_millis((current_millis.wrapping_sub(dive_start_millis)) as u64);
     display_set_dive_time(duration_since_start);
     state.last_dive_time_update_millis = current_millis;
-    rprintln!("Dive time updated");
     true
 }
 
@@ -92,13 +91,6 @@ where
     // rprintln!("Next interval: {:?}", next_interval);
     // rprintln!("Elapsed Milli: {:?}", elapsed_millis);
     if elapsed_millis < next_interval {
-        rprintln!(
-            "Deco overlay not due yet: elapsed={}ms next={}ms current_depth={:?} last_depth={:?}",
-            elapsed_millis,
-            next_interval,
-            current_depth,
-            state.last_deco_update_depth
-        );
         #[cfg(feature = "online_benchmarking")]
         benchmarking::log_decision(
             "dive.deco_schedule.rate",
@@ -126,6 +118,33 @@ where
                 .find(|stop| stop.duration().as_millis() > 0);
             rprintln!("First stop (deepest): {:?}", first_stop);
             rprintln!("Last used stop (shallowest): {:?}", last_stop);
+
+            #[cfg(feature = "live_sim")]
+            {
+                // Dump tissue loadings (a few tissues) and a summary to help debug
+                let max_print = 8usize.min(NUM_TISSUES);
+                rprintln!("Tissue loadings dump (first {} tissues):", max_print);
+                for i in 0..max_print {
+                    let n2 = loading.n2[i];
+                    let he = loading.he[i];
+                    rprintln!(" tissue {}: n2={:?}, he={:?}, total_inert={:?}", i, n2, he, (n2 + he));
+                }
+                // Compute max inert tissue and value
+                let mut max_idx: usize = 0;
+                let mut max_val = loading.n2[0] + loading.he[0];
+                for i in 1..NUM_TISSUES {
+                    let val = loading.n2[i] + loading.he[i];
+                    if val > max_val {
+                        max_val = val;
+                        max_idx = i;
+                    }
+                }
+                rprintln!(
+                    "Tissue max inert at idx={} value={:?} (Pa)",
+                    max_idx,
+                    max_val
+                );
+            }
             let mut overlay = EmulationDecoOverlay {
                 stops: [EmulationDecoStop::none(); MAX_STOP_NUMS],
                 count: 0,

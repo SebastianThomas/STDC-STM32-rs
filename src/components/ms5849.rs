@@ -50,6 +50,11 @@ pub struct SensorConfiguration {
 
 use crate::algorithms::profile_emulation::EmulationDecoOverlay;
 
+#[cfg(feature = "live_sim")]
+const DECO_TRANSIT_ASCENT_RATE_M_PER_MIN: f32 = 9.0;
+#[cfg(feature = "live_sim")]
+const LIVE_SIM_SAMPLE_INTERVAL_MS: u32 = 1_000;
+
 pub trait LiveSimEmulationControl {
     fn enter_live_sim(&mut self, _surface_pressure: Pa) {}
 
@@ -433,6 +438,7 @@ pub struct LiveSimMS5849<INTERFACE, P> {
     emulated_profile: EmulatedDiveProfile,
     emulation_active: bool,
     emulation_sample_index: usize,
+    emulation_last_tick_ms: u32,
 }
 
 #[cfg(feature = "live_sim")]
@@ -450,9 +456,10 @@ where
         Self {
             sensor,
             surf_ref,
-            emulated_profile: EmulatedDiveProfile::deep_with_defaults(1_000),
+            emulated_profile: EmulatedDiveProfile::deep_with_defaults(LIVE_SIM_SAMPLE_INTERVAL_MS),
             emulation_active: false,
             emulation_sample_index: 0,
+            emulation_last_tick_ms: Mono::now().ticks() as u32,
         }
     }
 
@@ -480,10 +487,20 @@ where
         if !self.emulation_active {
             return self.sensor.pressure();
         }
+        let now_ms = Mono::now().ticks() as u32;
+        let elapsed_ms = now_ms.wrapping_sub(self.emulation_last_tick_ms);
+        let advance_samples = elapsed_ms / LIVE_SIM_SAMPLE_INTERVAL_MS;
+        if advance_samples > 0 {
+            self.emulation_sample_index = self
+                .emulation_sample_index
+                .wrapping_add(advance_samples as usize);
+            self.emulation_last_tick_ms = self.emulation_last_tick_ms.wrapping_add(
+                advance_samples.saturating_mul(LIVE_SIM_SAMPLE_INTERVAL_MS),
+            );
+        }
         let emulated_point =
             self.emulated_profile
-                .point_at(self.surf_ref, 1_000, self.emulation_sample_index);
-        self.emulation_sample_index = self.emulation_sample_index.wrapping_add(1);
+                .point_at(self.surf_ref, LIVE_SIM_SAMPLE_INTERVAL_MS, self.emulation_sample_index);
         Some(emulated_point.depth_pa)
     }
 }
@@ -491,21 +508,53 @@ where
 #[cfg(feature = "live_sim")]
 impl<I, P> LiveSimEmulationControl for LiveSimMS5849<I, P> {
     fn enter_live_sim(&mut self, _surface_pressure: Pa) {
-        self.emulated_profile = EmulatedDiveProfile::deep_with_defaults(1_000);
+        self.emulated_profile = EmulatedDiveProfile::deep_with_defaults(LIVE_SIM_SAMPLE_INTERVAL_MS);
         self.emulation_active = true;
         self.emulation_sample_index = 0;
+        self.emulation_last_tick_ms = Mono::now().ticks() as u32;
     }
 
     fn exit_live_sim(&mut self) {
         self.emulation_active = false;
         self.emulation_sample_index = 0;
+        self.emulation_last_tick_ms = Mono::now().ticks() as u32;
     }
 
     fn sync_live_sim_dive_overlay(&mut self, overlay: EmulationDecoOverlay) {
         if overlay.count == 0 {
             self.emulated_profile = self.emulated_profile.without_deco_overlay();
         } else {
-            self.emulated_profile = self.emulated_profile.with_deco_overlay_obj(overlay);
+            let mut absolute_overlay = overlay;
+            let current_point = self
+                .emulated_profile
+                .point_at(
+                    self.surf_ref,
+                    LIVE_SIM_SAMPLE_INTERVAL_MS,
+                    self.emulation_sample_index,
+                );
+            let mut previous_depth = current_point.depth_pa;
+            let mut current_start = self.emulation_sample_index;
+
+            for stop in absolute_overlay.stops.iter_mut().take(absolute_overlay.count) {
+                let previous_depth_m = previous_depth.to_msw().to_f32();
+                let stop_depth_m = stop.stop_depth_pa.to_msw().to_f32();
+                let transit_depth_m = (previous_depth_m - stop_depth_m).max(0.0);
+                let transit_samples = if transit_depth_m > 0.0 {
+                    let transit_secs =
+                        (transit_depth_m / DECO_TRANSIT_ASCENT_RATE_M_PER_MIN) * 60.0;
+                    libm::ceilf((transit_secs * 1000.0) / LIVE_SIM_SAMPLE_INTERVAL_MS as f32)
+                        as usize
+                } else {
+                    0
+                };
+
+                current_start = current_start.saturating_add(transit_samples);
+                stop.start_sample = Some(current_start);
+                current_start = current_start.saturating_add(stop.hold_samples);
+                previous_depth = stop.stop_depth_pa;
+            }
+
+            self.emulated_profile = self.emulated_profile.with_deco_overlay_obj(absolute_overlay);
         }
     }
 }

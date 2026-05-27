@@ -1,6 +1,8 @@
+use num::ToPrimitive;
 use rtt_target::rprintln;
+use core::time::Duration;
 use stdc_diving_algorithms::{
-    deco_algorithm::DecoSettings,
+    deco_algorithm::{DecoSettings, MVALUES, TISSUES, update_model_state},
     dive::DiveMeasurement,
     gas::{GasDensitySettings, GasMix, MAX_GAS_DENSITY},
     o2tox::{O2ExposureType, O2ToxCalculation, calculate_toxicity_diff},
@@ -8,7 +10,7 @@ use stdc_diving_algorithms::{
     setup::NUM_TISSUES,
 };
 
-use stdc_stm32_rs::constants::barometric::DepthOrAltitude;
+use stdc_stm32_rs::{components::dive_log::{GF_HIGH, GF_LOW}, constants::barometric::DepthOrAltitude};
 use stm32l4xx_hal::rtc::Rtc;
 
 #[cfg(feature = "live_sim")]
@@ -24,7 +26,6 @@ use stdc_stm32_rs::{
             CurrentDiveModeWithInfo, DecoAlgorithmType, LevelState, LogDiveControlDataBlock,
             LogPointData, LogPointMetadata,
         },
-        flash::Flash,
         spi_utils::DetailsError,
         // uart_log removed from dive mode; use rprintln! instead
     },
@@ -69,8 +70,8 @@ pub struct DiveFlashLog {
     pub measurement: DiveMeasurement<Pa>,
 }
 
-pub fn setup_dive_mode<F: Flash, const NR_GASES: usize>(
-    flash: &mut F,
+pub fn setup_dive_mode<const NR_GASES: usize>(
+    flash: &mut crate::FlashDevice,
     rtc: &Rtc,
     surface_pressure: Pa,
     gases: &[GasMix<f32>; NR_GASES],
@@ -91,6 +92,10 @@ where
             limit_g_l: MAX_GAS_DENSITY,
         },
         max_deco_po2: Bar::new(1.6).to_pa(),
+        gf_high: GF_HIGH.to_f32().unwrap() / 100.0,
+        gf_low: GF_LOW.to_f32().unwrap() / 100.0,
+        ignore_icd: false,
+        last_deco_stop: msw(6.0),
     };
 
     let current_gas_mode_idx = CurrentDiveModeWithInfo::OC { gas_idx: 0 };
@@ -124,6 +129,13 @@ where
     if let Err(e) = dive_control_write {
         rprintln!("Failed writing dive control data block.");
         rprintln!("Flash error details: {:?}", e.details());
+    } else if let Ok(start_addr) = dive_control_write {
+        let next_pos = start_addr + (24 + NR_GASES * 3) as u32;
+        if let Err(e) = crate::modes::flash_write_and_measure("flash.control.persist_pos", || {
+            crate::persist_flash_log_position(flash, next_pos)
+        }) {
+            rprintln!("Failed persisting flash position after control block: {:?}", e);
+        }
     }
 
     DiveRuntime::<NR_GASES> {
@@ -184,9 +196,11 @@ where
                 temperature_c,
                 measurement_millis,
             );
+            rprintln!("Handling depth measurement {:?} at {:?}", pressure, depth);
             handle_depth_measurement(
                 pressure,
                 depth,
+                latest_measurements.pressure.map(|sample| sample.value),
                 latest_calculations_state,
                 &mut runtime.last_measurement_millis,
                 measurement_millis,
@@ -261,9 +275,9 @@ where
     (None, latest_measurements, flash_log)
 }
 
-pub fn write_flash_log<F: Flash, const NUM_GASES: usize>(
+pub fn write_flash_log<const NUM_GASES: usize>(
     runtime: &mut DiveRuntime<NUM_GASES>,
-    flash: &mut F,
+    flash: &mut crate::FlashDevice,
     flash_log: DiveFlashLog,
     latest_measurements: &LatestMeasurements,
 ) {
@@ -281,9 +295,16 @@ pub fn write_flash_log<F: Flash, const NUM_GASES: usize>(
     let write_res =
         crate::modes::flash_write_and_measure("flash.point.write", || log_point_data.write(flash));
     match write_res {
-        Ok(_) => {
+        Ok((basic_start_addr, deco_start_addr)) => {
             runtime.last_logged_millis = flash_log.measurement_millis;
             runtime.last_logged_pressure = flash_log.pressure;
+
+            let next_pos = deco_start_addr.map(|addr| addr + 8).unwrap_or(basic_start_addr + 8);
+            if let Err(e) = crate::modes::flash_write_and_measure("flash.point.persist_pos", || {
+                crate::persist_flash_log_position(flash, next_pos)
+            }) {
+                rprintln!("Failed persisting flash position after log point: {:?}", e);
+            }
         }
         Err(e) => {
             rprintln!("Failed writing log point data to flash: {:?}", e);
@@ -291,10 +312,11 @@ pub fn write_flash_log<F: Flash, const NUM_GASES: usize>(
     }
 }
 
-fn handle_depth_measurement<const NR_GASES: usize, const NUM_TISSUES: usize>(
+fn handle_depth_measurement<const NR_GASES: usize>(
     pressure: Pa,
     depth: msw,
-    latest_calculations_state: &mut LatestCalculationsState<NUM_TISSUES, Pa>,
+    previous_pressure: Option<Pa>,
+    latest_calculations_state: &mut LatestCalculationsState<{ NUM_TISSUES }, Pa>,
     last_measurement_millis: &mut u32,
     measurement_millis: u32,
     max_depth: &mut Pa,
@@ -303,7 +325,6 @@ fn handle_depth_measurement<const NR_GASES: usize, const NUM_TISSUES: usize>(
     current_gas_mode_idx: &CurrentDiveModeWithInfo,
 ) {
     benchmarking::measure_and_log("dive.rate_and_logging", || {
-        rprintln!("Measuring Pressure: {:?}, depth: {:?}", pressure, depth);
         display_set_depth(depth);
 
         let time_delta = measurement_millis.wrapping_sub(*last_measurement_millis);
@@ -313,11 +334,16 @@ fn handle_depth_measurement<const NR_GASES: usize, const NUM_TISSUES: usize>(
             *max_depth = pressure;
         }
 
-        let current_gas = current_gas_mode_idx.to_fixed_gas(gases, pressure);
-        latest_calculations_state.deco.tissue_loadings.tick(
-            time_delta.try_into().unwrap_or(u16::MAX),
-            pressure,
+        let loading_pressure = previous_pressure.map(|prev| (prev + pressure) / 2.0).unwrap_or(pressure);
+        let current_gas = current_gas_mode_idx.to_fixed_gas(gases, loading_pressure);
+        let delta_time = Duration::from_millis(time_delta as u64);
+        update_model_state(
+            &mut latest_calculations_state.deco.tissue_loadings,
+            &TISSUES,
+            &MVALUES,
             &current_gas,
+            loading_pressure,
+            &delta_time,
         );
     });
 

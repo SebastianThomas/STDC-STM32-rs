@@ -111,6 +111,14 @@ impl<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> SpiDisplay<SPI, P
         self.update_cache(false, value)
     }
 
+    pub(crate) fn depth_cache_len(&self) -> usize {
+        self.depth_cache_len
+    }
+
+    pub(crate) fn time_cache_len(&self) -> usize {
+        self.time_cache_len
+    }
+
     fn update_cache(&mut self, is_depth: bool, value: &[u8]) -> bool {
         let len = core::cmp::min(value.len(), STATUS_CACHE_LEN);
         let (cache, cache_len) = if is_depth {
@@ -133,15 +141,18 @@ impl<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> SpiDisplay<SPI, P
 where
     Spi<SPI, PINS>: Write<u8>,
 {
+    pub(crate) fn write_data_raw(&mut self, data: &[u8]) -> Result<(), SpiError> {
+        Write::write(&mut self.spi, data)
+            .map_err(|_| SpiError::new(1, "Failed writing display data over SPI"))
+    }
+
     pub(crate) fn write_command(&mut self, command: u8) -> Result<(), SpiError> {
         self.set_command_mode()?;
-        Write::write(&mut self.spi, &[command])
-            .map_err(|_| SpiError::new(1, "Failed writing display command over SPI"))
+        self.write_data_raw(&[command])
     }
 
     pub(crate) fn write_data(&mut self, data: &[u8]) -> Result<(), SpiError> {
         self.set_data_mode()?;
-        Write::write(&mut self.spi, data)
-            .map_err(|_| SpiError::new(1, "Failed writing display data over SPI"))
+        self.write_data_raw(data)
     }
 }

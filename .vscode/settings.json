@@ -37,6 +37,10 @@
       "matchCommandLine": true
     },
     "cargo check": true,
-    "cargo test": true
+    "cargo test": true,
+    "/^just t$/": {
+      "approve": true,
+      "matchCommandLine": true
+    }
   }
 }

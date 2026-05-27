@@ -16,7 +16,7 @@ cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 rtt-target = { version = "0.6", features = ["defmt"] }
 defmt = "1.0"
 libm = "0.2.15"
-stdc_diving_algorithms = { git = "https://github.com/SebastianThomas/STDC-thalmann.git", version="0.1.25" }
+stdc_diving_algorithms = { git = "https://github.com/SebastianThomas/STDC-thalmann.git", version="0.1.27" }
 num = { version = "0.4.3", default-features = false, features = ["libm"] }
 nb = "1.1.0"
 fixed = "1.31.0"

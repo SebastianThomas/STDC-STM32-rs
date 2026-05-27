@@ -319,7 +319,7 @@ impl<SPI: Transfer<u8> + Write<u8>, CSPin: OutputPin> Flash for SpiFlash<SPI, CS
     type Error = SpiError;
 
     fn set_pos(&mut self, new_pos: u32) -> Result<u32, Self::Error> {
-        if self.max_addr > new_pos {
+        if new_pos > self.max_addr {
             return Err(SpiError {
                 priority: 0,
                 details: "New address out of range for given Flash chip.",

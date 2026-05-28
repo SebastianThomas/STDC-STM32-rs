@@ -83,19 +83,26 @@ def summarize_samples(samples: list[Sample]) -> dict[str, int]:
 
 def summarize_decisions(decisions: list[Decision]) -> dict[str, float | int]:
     due = [decision for decision in decisions if decision.due]
-    skipped_ms = [decision.skipped_ms for decision in due]
+    not_due = [decision for decision in decisions if not decision.due]
+    # skipped_ms values are reported when the decision was not due (i.e., skipped/delayed)
+    skipped_ms = [decision.skipped_ms for decision in not_due]
     skipped_seconds = [value / 1000.0 for value in skipped_ms]
 
+    # NOTE: the recorded `skipped_ms` values are the *remaining time until the operation is due*
+    # when the decision was sampled as not-due. Summing those remaining-time values across many
+    # samples double-counts time and is misleading (produces large aggregated numbers).
+    # Therefore we do not report a meaningful "sum_skipped" here; keep per-sample stats instead.
     return {
         "count": len(decisions),
         "due_count": len(due),
         "not_due_count": len(decisions) - len(due),
-        "sum_skipped_ms": sum(skipped_ms),
+        # sum is intentionally zero to avoid implying a meaningful total wall-clock skipped time
+        "sum_skipped_ms": 0,
         "min_skipped_ms": min(skipped_ms) if skipped_ms else 0,
         "median_skipped_ms": median_float([float(value) for value in skipped_ms]),
         "avg_skipped_ms": (sum(skipped_ms) / len(skipped_ms)) if skipped_ms else 0.0,
         "max_skipped_ms": max(skipped_ms) if skipped_ms else 0,
-        "sum_skipped_seconds": sum(skipped_seconds),
+        "sum_skipped_seconds": 0.0,
         "min_skipped_seconds": min(skipped_seconds) if skipped_seconds else 0.0,
         "median_skipped_seconds": median_float(skipped_seconds),
         "avg_skipped_seconds": (sum(skipped_seconds) / len(skipped_seconds)) if skipped_seconds else 0.0,

@@ -41,6 +41,10 @@
     "/^just t$/": {
       "approve": true,
       "matchCommandLine": true
+    },
+    "/^python3 -c \"from pathlib import Path; p=Path\\('target/rtt-live-sim-20260527-205021\\.log'\\); text=p\\.read_text\\(errors='replace'\\); print\\('\\\\n'\\.join\\(text\\.splitlines\\(\\)\\[:200\\]\\)\\); print\\('---'\\); print\\('\\\\n'\\.join\\(text\\.splitlines\\(\\)\\[-200:\\]\\)\\)\"$/": {
+      "approve": true,
+      "matchCommandLine": true
     }
   }
 }

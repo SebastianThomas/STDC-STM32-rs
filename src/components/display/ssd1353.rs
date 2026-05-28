@@ -1,4 +1,7 @@
-use stdc_diving_algorithms::pressure_unit::{Pressure, msw};
+use stdc_diving_algorithms::{
+    depth_utils::get_ascent_time,
+    pressure_unit::{Pressure, msw},
+};
 use stm32l4xx_hal::{
     hal::{blocking::spi::Write, digital::v2::OutputPin},
     spi::Spi,
@@ -46,6 +49,9 @@ const DISPLAY_TITLE: &[u8] = b"STDC";
 const STATUS_SCALE: u8 = 2;
 const STATUS_Y: u8 = 2;
 const STATUS_PADDING: u8 = 2;
+const STATUS_DECO_Y: u8 = 20;
+const STATUS_TTS_Y: u8 = 32;
+const STATUS_INFO_SCALE: u8 = 1;
 const STATUS_LEFT_X: u8 = 0;
 const STATUS_LEFT_W: u8 = SSD1353_WIDTH / 2;
 const STATUS_RIGHT_X: u8 = SSD1353_WIDTH / 2;
@@ -82,6 +88,16 @@ fn append_u32_ascii(mut value: u32, out: &mut [u8], offset: &mut usize) {
     }
 }
 
+fn append_bytes(out: &mut [u8], offset: &mut usize, bytes: &[u8]) {
+    for byte in bytes {
+        if *offset >= out.len() {
+            return;
+        }
+        out[*offset] = *byte;
+        *offset += 1;
+    }
+}
+
 fn format_depth_text(depth: msw, out: &mut [u8; 16]) -> usize {
     let mut val = depth.to_f32();
     if !val.is_finite() || val < 0.0 {
@@ -90,7 +106,7 @@ fn format_depth_text(depth: msw, out: &mut [u8; 16]) -> usize {
 
     let tenths = (val * 10.0 + 0.5) as u32;
     let whole = tenths / 10;
-    let frac = tenths % 10;
+    let frac = (tenths % 10) as u8;
 
     let mut len = 0;
     append_u32_ascii(whole, out, &mut len);
@@ -99,7 +115,7 @@ fn format_depth_text(depth: msw, out: &mut [u8; 16]) -> usize {
         len += 1;
     }
     if len < out.len() {
-        out[len] = b'0' + frac as u8;
+        out[len] = b'0' + frac;
         len += 1;
     }
     if len < out.len() {
@@ -110,23 +126,38 @@ fn format_depth_text(depth: msw, out: &mut [u8; 16]) -> usize {
     len
 }
 
-fn format_dive_time_text(dive_time: Duration, out: &mut [u8; 16]) -> usize {
-    let secs = dive_time.as_secs();
-    let mins = (secs / 60) as u32;
-    let rem_secs = (secs % 60) as u32;
-
+fn format_minutes_text(duration: Duration, out: &mut [u8; 16]) -> usize {
+    const D: usize = 3;
     let mut len = 0;
-    append_u32_ascii(mins, out, &mut len);
-    if len < out.len() {
-        out[len] = b':';
-        len += 1;
-    }
-    if len + 1 < out.len() {
-        out[len] = b'0' + (rem_secs / 10) as u8;
-        out[len + 1] = b'0' + (rem_secs % 10) as u8;
-        len += 2;
+    let minutes = core::cmp::min(duration.as_secs() / 60, 999) as u32;
+    // write digits into a small temp buffer then copy right-aligned into out
+    let mut tmp = [b' '; D];
+    let mut tpos = D;
+    if minutes == 0 {
+        tpos -= 1;
+        tmp[tpos] = b'0';
+    } else {
+        let mut v = minutes;
+        while v > 0 && tpos > 0 {
+            tpos -= 1;
+            tmp[tpos] = b'0' + (v % 10) as u8;
+            v /= 10;
+        }
     }
 
+    // produce exactly D columns, mapping empty to spaces
+    for i in 0..D {
+        if len < out.len() {
+            out[len] = tmp[i];
+            len += 1;
+        }
+    }
+    len
+}
+
+fn format_ndl_text(out: &mut [u8; 16]) -> usize {
+    let mut len = 0;
+    append_bytes(out, &mut len, b"NDL");
     len
 }
 
@@ -505,43 +536,134 @@ where
         return self.draw_scaled_text_block(x, y, &draw_buf[..draw_len], scale, color, max_width);
     }
 
+    fn draw_status_text_if_changed(
+        &mut self,
+        changed: bool,
+        x: u8,
+        y: u8,
+        text: &[u8],
+        prev_len: usize,
+        scale: u8,
+        color: u16,
+        max_width: u8,
+    ) -> Result<(), SpiError> {
+        if !changed {
+            return Ok(());
+        }
+
+        self.draw_status_text_padded(x, y, text, prev_len, scale, color, max_width)
+    }
+
     pub fn ssd1353_show_depth_and_dive_time(
         &mut self,
         state: &DisplayState,
     ) -> Result<(), SpiError> {
         let mut depth_label = [0u8; 16];
         let mut time_label = [0u8; 16];
+        let mut deco_label = [0u8; 16];
+        let mut stop_time_label = [0u8; 16];
+        let mut tts_label = [0u8; 16];
         let depth_len = format_depth_text(state.depth, &mut depth_label);
-        let time_len = format_dive_time_text(state.dive_time, &mut time_label);
+        let time_len = format_minutes_text(state.dive_time, &mut time_label);
 
         let prev_depth_len = self.depth_cache_len();
         let prev_time_len = self.time_cache_len();
         let depth_changed = self.update_depth_cache(&depth_label[..depth_len]);
         let time_changed = self.update_time_cache(&time_label[..time_len]);
 
-        if depth_changed {
-            self.draw_status_text_padded(
-                STATUS_LEFT_X + STATUS_PADDING,
-                STATUS_Y,
-                &depth_label[..depth_len],
-                prev_depth_len,
-                STATUS_SCALE,
-                COLOR_SUBTITLE,
-                STATUS_LEFT_W - STATUS_PADDING * 2,
-            )?;
+        let ascent_rate_per_meter = Duration::from_millis(6_667);
+        let mut deco_changed = false;
+        let mut stop_time_changed = false;
+        let mut tts_changed = false;
+        let prev_deco_len = self.deco_cache_len();
+        let prev_stop_time_len = self.stop_time_cache_len();
+        let prev_tts_len = self.tts_cache_len();
+        let mut deco_len = 0usize;
+        let mut stop_time_len = 0usize;
+        let mut tts_len = 0usize;
+
+        if let Ok(stop_schedule) = &state.stop_schedule {
+            if let Some(first_stop) = stop_schedule.first_stop() {
+                // TODO: The actual ceiling could be derived from tissue loading here; stop depth is
+                //  the available proxy for now.
+                deco_len = format_depth_text(first_stop.depth(), &mut deco_label);
+                stop_time_len = format_minutes_text(first_stop.duration(), &mut stop_time_label);
+                tts_len = format_minutes_text(
+                    stop_schedule.get_deco_tts(&ascent_rate_per_meter),
+                    &mut tts_label,
+                );
+
+                deco_changed = self.update_deco_cache(&deco_label[..deco_len]);
+                stop_time_changed = self.update_stop_time_cache(&stop_time_label[..stop_time_len]);
+                tts_changed = self.update_tts_cache(&tts_label[..tts_len]);
+            } else {
+                deco_len = 0;
+                stop_time_len = format_ndl_text(&mut stop_time_label);
+                tts_len = format_minutes_text(
+                    get_ascent_time(state.depth, &ascent_rate_per_meter),
+                    &mut tts_label,
+                );
+
+                deco_changed = self.update_deco_cache(&deco_label[..deco_len]);
+                stop_time_changed = self.update_stop_time_cache(&stop_time_label[..stop_time_len]);
+                tts_changed = self.update_tts_cache(&tts_label[..tts_len]);
+            }
         }
 
-        if time_changed {
-            self.draw_status_text_padded(
-                STATUS_RIGHT_X + STATUS_PADDING,
-                STATUS_Y,
-                &time_label[..time_len],
-                prev_time_len,
-                STATUS_SCALE,
-                COLOR_SUBTITLE,
-                STATUS_RIGHT_W - STATUS_PADDING * 2,
-            )?;
-        }
+        self.draw_status_text_if_changed(
+            depth_changed,
+            STATUS_LEFT_X + STATUS_PADDING,
+            STATUS_Y,
+            &depth_label[..depth_len],
+            prev_depth_len,
+            STATUS_SCALE,
+            COLOR_SUBTITLE,
+            STATUS_LEFT_W - STATUS_PADDING * 2,
+        )?;
+
+        self.draw_status_text_if_changed(
+            time_changed,
+            STATUS_RIGHT_X + STATUS_PADDING,
+            STATUS_Y,
+            &time_label[..time_len],
+            prev_time_len,
+            STATUS_SCALE,
+            COLOR_SUBTITLE,
+            STATUS_RIGHT_W - STATUS_PADDING * 2,
+        )?;
+
+        self.draw_status_text_if_changed(
+            deco_changed,
+            STATUS_LEFT_X + STATUS_PADDING,
+            STATUS_DECO_Y,
+            &deco_label[..deco_len],
+            prev_deco_len,
+            STATUS_INFO_SCALE,
+            COLOR_SUBTITLE,
+            STATUS_LEFT_W - STATUS_PADDING * 2,
+        )?;
+
+        self.draw_status_text_if_changed(
+            stop_time_changed,
+            STATUS_RIGHT_X + STATUS_PADDING,
+            STATUS_DECO_Y,
+            &stop_time_label[..stop_time_len],
+            prev_stop_time_len,
+            STATUS_INFO_SCALE,
+            COLOR_SUBTITLE,
+            STATUS_RIGHT_W - STATUS_PADDING * 2,
+        )?;
+
+        self.draw_status_text_if_changed(
+            tts_changed,
+            STATUS_PADDING,
+            STATUS_TTS_Y,
+            &tts_label[..tts_len],
+            prev_tts_len,
+            STATUS_INFO_SCALE,
+            COLOR_SUBTITLE,
+            SSD1353_WIDTH - STATUS_PADDING * 2,
+        )?;
 
         Ok(())
     }

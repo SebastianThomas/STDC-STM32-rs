@@ -5,7 +5,11 @@ use stm32l4xx_hal::{
 
 use crate::components::spi_utils::SpiError;
 
-const STATUS_CACHE_LEN: usize = 16;
+// Depth fields (e.g. "30.0m") need a few chars; keep small but safe
+const STATUS_DEPTH_CACHE_LEN: usize = 8;
+// Minute fields are fixed-width D=3 (right-aligned), so use 3 bytes
+const STATUS_MINUTES_LEN: usize = 3;
+const STATUS_LABEL_CACHE_LEN: usize = STATUS_MINUTES_LEN;
 
 pub struct SpiDisplay<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> {
     power_enable: EN,
@@ -14,10 +18,16 @@ pub struct SpiDisplay<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> 
     not_data_command: NDC,
 
     enabled: bool,
-    depth_cache: [u8; STATUS_CACHE_LEN],
+    depth_cache: [u8; STATUS_DEPTH_CACHE_LEN],
     depth_cache_len: usize,
-    time_cache: [u8; STATUS_CACHE_LEN],
+    time_cache: [u8; STATUS_MINUTES_LEN],
     time_cache_len: usize,
+    stop_time_cache: [u8; STATUS_MINUTES_LEN],
+    stop_time_cache_len: usize,
+    deco_cache: [u8; STATUS_DEPTH_CACHE_LEN],
+    deco_cache_len: usize,
+    tts_cache: [u8; STATUS_MINUTES_LEN],
+    tts_cache_len: usize,
 }
 
 impl<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> SpiDisplay<SPI, PINS, EN, RST, NDC> {
@@ -33,10 +43,16 @@ impl<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> SpiDisplay<SPI, P
             spi_reset,
             not_data_command,
             enabled: false,
-            depth_cache: [0; STATUS_CACHE_LEN],
+            depth_cache: [0; STATUS_DEPTH_CACHE_LEN],
             depth_cache_len: 0,
-            time_cache: [0; STATUS_CACHE_LEN],
+            time_cache: [0; STATUS_MINUTES_LEN],
             time_cache_len: 0,
+            stop_time_cache: [0; STATUS_MINUTES_LEN],
+            stop_time_cache_len: 0,
+            deco_cache: [0; STATUS_DEPTH_CACHE_LEN],
+            deco_cache_len: 0,
+            tts_cache: [0; STATUS_MINUTES_LEN],
+            tts_cache_len: 0,
         }
     }
 
@@ -119,12 +135,40 @@ impl<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> SpiDisplay<SPI, P
         self.time_cache_len
     }
 
+    pub(crate) fn deco_cache_len(&self) -> usize {
+        self.deco_cache_len
+    }
+
+    pub(crate) fn stop_time_cache_len(&self) -> usize {
+        self.stop_time_cache_len
+    }
+
+    pub(crate) fn tts_cache_len(&self) -> usize {
+        self.tts_cache_len
+    }
+
+    pub(crate) fn update_deco_cache(&mut self, value: &[u8]) -> bool {
+        self.update_deco_or_tts_cache(true, value)
+    }
+
+    pub(crate) fn update_tts_cache(&mut self, value: &[u8]) -> bool {
+        self.update_deco_or_tts_cache(false, value)
+    }
+
+    pub(crate) fn update_stop_time_cache(&mut self, value: &[u8]) -> bool {
+        self.update_stop_time_cache_inner(value)
+    }
+
     fn update_cache(&mut self, is_depth: bool, value: &[u8]) -> bool {
-        let len = core::cmp::min(value.len(), STATUS_CACHE_LEN);
-        let (cache, cache_len) = if is_depth {
-            (&mut self.depth_cache, &mut self.depth_cache_len)
+        let len = if is_depth {
+            core::cmp::min(value.len(), STATUS_DEPTH_CACHE_LEN)
         } else {
-            (&mut self.time_cache, &mut self.time_cache_len)
+            core::cmp::min(value.len(), STATUS_MINUTES_LEN)
+        };
+        let (cache, cache_len) = if is_depth {
+            (&mut self.depth_cache[..], &mut self.depth_cache_len)
+        } else {
+            (&mut self.time_cache[..], &mut self.time_cache_len)
         };
 
         if *cache_len == len && cache[..len] == value[..len] {
@@ -133,6 +177,39 @@ impl<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> SpiDisplay<SPI, P
 
         cache[..len].copy_from_slice(&value[..len]);
         *cache_len = len;
+        true
+    }
+
+    fn update_deco_or_tts_cache(&mut self, is_deco: bool, value: &[u8]) -> bool {
+        let len = if is_deco {
+            core::cmp::min(value.len(), STATUS_DEPTH_CACHE_LEN)
+        } else {
+            core::cmp::min(value.len(), STATUS_MINUTES_LEN)
+        };
+        let (cache, cache_len) = if is_deco {
+            (&mut self.deco_cache[..], &mut self.deco_cache_len)
+        } else {
+            (&mut self.tts_cache[..], &mut self.tts_cache_len)
+        };
+
+        if *cache_len == len && cache[..len] == value[..len] {
+            return false;
+        }
+
+        cache[..len].copy_from_slice(&value[..len]);
+        *cache_len = len;
+        true
+    }
+
+    fn update_stop_time_cache_inner(&mut self, value: &[u8]) -> bool {
+        let len = core::cmp::min(value.len(), STATUS_MINUTES_LEN);
+
+        if self.stop_time_cache_len == len && self.stop_time_cache[..len] == value[..len] {
+            return false;
+        }
+
+        self.stop_time_cache[..len].copy_from_slice(&value[..len]);
+        self.stop_time_cache_len = len;
         true
     }
 }

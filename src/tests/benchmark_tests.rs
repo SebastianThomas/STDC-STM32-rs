@@ -10,7 +10,7 @@ use stdc_diving_algorithms::{
 };
 
 use crate::{
-    algorithms::profile_emulation::EmulatedDiveProfile,
+    algorithms::profile_emulation::{EmulatedDiveProfile, EmulationDecoOverlay},
     algorithms::rate_algorithm::{
         DecoUpdateRateAlgorithm, FlashLogRateAlgorithm, O2ToxUpdateRateAlgorithm, RateAlgorithm,
     },
@@ -36,6 +36,17 @@ use std::{
 
 static REPORT_PRINT_LOCK: Mutex<()> = Mutex::new(());
 
+#[derive(Clone, Copy, Debug, Default)]
+struct DisplayUpdateCompareStats {
+    samples: usize,
+    depth_updates: usize,
+    time_updates: usize,
+    legacy_window_ops: usize,
+    batched_window_ops: usize,
+    legacy_char_ops: usize,
+    batched_char_ops: usize,
+}
+
 struct SchedulerSet {
     deco_rate: DecoUpdateRateAlgorithm,
     o2_rate: O2ToxUpdateRateAlgorithm,
@@ -54,6 +65,131 @@ impl SchedulerSet {
 
 fn print_rule() {
     println!("+---------------------------------------------------------------+");
+}
+
+fn append_u32_ascii(mut value: u32, out: &mut [u8], offset: &mut usize) {
+    if *offset >= out.len() {
+        return;
+    }
+
+    if value == 0 {
+        out[*offset] = b'0';
+        *offset += 1;
+        return;
+    }
+
+    let mut digits = [0u8; 10];
+    let mut pos = 0;
+    while value > 0 && pos < digits.len() {
+        digits[pos] = (value % 10) as u8;
+        value /= 10;
+        pos += 1;
+    }
+
+    while pos > 0 && *offset < out.len() {
+        pos -= 1;
+        out[*offset] = b'0' + digits[pos];
+        *offset += 1;
+    }
+}
+
+fn format_depth_text_local(depth: msw, out: &mut [u8; 16]) -> usize {
+    let mut val = depth.to_f32();
+    if !val.is_finite() || val < 0.0 {
+        val = 0.0;
+    }
+
+    let tenths = (val * 10.0 + 0.5) as u32;
+    let whole = tenths / 10;
+    let frac = tenths % 10;
+
+    let mut len = 0;
+    append_u32_ascii(whole, out, &mut len);
+    if len < out.len() {
+        out[len] = b'.';
+        len += 1;
+    }
+    if len < out.len() {
+        out[len] = b'0' + frac as u8;
+        len += 1;
+    }
+    if len < out.len() {
+        out[len] = b'm';
+        len += 1;
+    }
+
+    len
+}
+
+fn format_dive_time_text_local(dive_time: core::time::Duration, out: &mut [u8; 16]) -> usize {
+    let secs = dive_time.as_secs();
+    let mins = (secs / 60) as u32;
+    let rem_secs = (secs % 60) as u32;
+
+    let mut len = 0;
+    append_u32_ascii(mins, out, &mut len);
+    if len < out.len() {
+        out[len] = b':';
+        len += 1;
+    }
+    if len + 1 < out.len() {
+        out[len] = b'0' + (rem_secs / 10) as u8;
+        out[len + 1] = b'0' + (rem_secs % 10) as u8;
+        len += 2;
+    }
+
+    len
+}
+
+fn compare_display_update_strategies(
+    measurements: &[DiveMeasurement<Pa>],
+) -> DisplayUpdateCompareStats {
+    let mut stats = DisplayUpdateCompareStats {
+        samples: measurements.len(),
+        ..Default::default()
+    };
+
+    let mut prev_depth = [0u8; 16];
+    let mut prev_time = [0u8; 16];
+    let mut prev_depth_len = 0usize;
+    let mut prev_time_len = 0usize;
+
+    for measurement in measurements {
+        let mut depth_text = [0u8; 16];
+        let mut time_text = [0u8; 16];
+        let depth_len = format_depth_text_local(measurement.depth.to_msw(), &mut depth_text);
+        let time_len = format_dive_time_text_local(
+            core::time::Duration::from_millis(measurement.time_ms as u64),
+            &mut time_text,
+        );
+
+        let depth_changed =
+            depth_len != prev_depth_len || depth_text[..depth_len] != prev_depth[..depth_len];
+        let time_changed =
+            time_len != prev_time_len || time_text[..time_len] != prev_time[..time_len];
+
+        if depth_changed {
+            stats.depth_updates += 1;
+            stats.legacy_window_ops += depth_len;
+            stats.batched_window_ops += 1;
+            stats.legacy_char_ops += depth_len;
+            stats.batched_char_ops += depth_len;
+            prev_depth[..depth_len].copy_from_slice(&depth_text[..depth_len]);
+            prev_depth_len = depth_len;
+        }
+
+        if time_changed {
+            stats.time_updates += 1;
+            stats.legacy_window_ops += time_len;
+            stats.batched_window_ops += 1;
+            stats.legacy_char_ops += time_len;
+            stats.batched_char_ops += time_len;
+            prev_time[..time_len].copy_from_slice(&time_text[..time_len]);
+            prev_time_len = time_len;
+        }
+    }
+
+    stats
 }
 
 fn print_row(content: &str) {
@@ -554,7 +690,8 @@ where
     };
 
     let mut overlay = EmulationDecoOverlay {
-        stops: [crate::algorithms::profile_emulation::EmulationDecoStop::none(); BENCHMARK_DECO_MAX_STOPS],
+        stops: [crate::algorithms::profile_emulation::EmulationDecoStop::none();
+            BENCHMARK_DECO_MAX_STOPS],
         count: 0,
     };
     for stop in schedule
@@ -580,9 +717,7 @@ where
         return None;
     }
 
-    Some(DecoOverlayInfo {
-        overlay,
-    })
+    Some(DecoOverlayInfo { overlay })
 }
 
 fn generate_deco_aware_profile(
@@ -601,6 +736,7 @@ fn generate_deco_aware_profile(
         gf_high: 0.50,
         gf_low: 0.85,
         ignore_icd: false,
+        last_deco_stop: msw(6.0),
     };
 
     let base = generate_emulated_profile(count, profile, time_step_ms);
@@ -947,6 +1083,7 @@ fn benchmark_dive_profile(
         gf_high: 0.50,
         gf_low: 0.85,
         ignore_icd: false,
+        last_deco_stop: msw(6.0),
     };
 
     let mut sched = SchedulerSet::new();
@@ -1277,6 +1414,14 @@ fn generate_profile_deep_long(count: usize) -> (EmulatedDiveProfile, Vec<DiveMea
     generate_deco_aware_profile(count, profile, 200)
 }
 
+fn generate_profile_micro(count: usize) -> (EmulatedDiveProfile, Vec<DiveMeasurement<Pa>>) {
+    generate_deco_aware_profile(
+        count,
+        EmulatedDiveProfile::shallow_20m_with_defaults(5_000),
+        5_000,
+    )
+}
+
 #[test]
 fn benchmark_small_profile() {
     let (profile, measurements) = generate_profile_small(2_048);
@@ -1299,4 +1444,51 @@ fn benchmark_deep_profile() {
 fn benchmark_deep_long_profile() {
     let (profile, measurements) = generate_profile_deep_long(2 * 4_096);
     benchmark_dive_profile("profile.deep.long", profile, 200, &measurements);
+}
+
+#[test]
+fn benchmark_micro_profile_display_compare() {
+    let (profile, measurements) = generate_profile_micro(256);
+    let stats = compare_display_update_strategies(&measurements);
+
+    let _guard = REPORT_PRINT_LOCK.lock().unwrap();
+    println!();
+    print_title("Display Update Compare - profile.shallow_20m");
+    print_row(&format!(
+        "profile_cycle_length={} measurements={}",
+        profile.cycle_length(),
+        measurements.len()
+    ));
+    print_rule();
+    print_row("metric                     | count  | legacy ops | batched ops | ratio");
+    print_rule();
+    let ratio = if stats.batched_window_ops == 0 {
+        0.0
+    } else {
+        stats.legacy_window_ops as f32 / stats.batched_window_ops as f32
+    };
+    print_row(&format!(
+        "display updates            | {:<6} | {:<10} | {:<11} | {:.2}x",
+        stats.depth_updates + stats.time_updates,
+        stats.legacy_window_ops,
+        stats.batched_window_ops,
+        ratio
+    ));
+    print_row(&format!(
+        "profile samples            | {:<6} | {:<10} | {:<11} | n/a",
+        stats.samples, stats.samples, stats.samples
+    ));
+    print_row(&format!(
+        "depth changes              | {:<6} | {:<10} | {:<11} | n/a",
+        stats.depth_updates, stats.depth_updates, stats.depth_updates
+    ));
+    print_row(&format!(
+        "time changes               | {:<6} | {:<10} | {:<11} | n/a",
+        stats.time_updates, stats.time_updates, stats.time_updates
+    ));
+    print_row(&format!(
+        "character payload bytes    | {:<6} | {:<10} | {:<11} | 1.00x",
+        stats.legacy_char_ops, stats.legacy_char_ops, stats.batched_char_ops
+    ));
+    print_rule();
 }

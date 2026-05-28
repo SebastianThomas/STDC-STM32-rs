@@ -494,13 +494,15 @@ where
             self.emulation_sample_index = self
                 .emulation_sample_index
                 .wrapping_add(advance_samples as usize);
-            self.emulation_last_tick_ms = self.emulation_last_tick_ms.wrapping_add(
-                advance_samples.saturating_mul(LIVE_SIM_SAMPLE_INTERVAL_MS),
-            );
+            self.emulation_last_tick_ms = self
+                .emulation_last_tick_ms
+                .wrapping_add(advance_samples.saturating_mul(LIVE_SIM_SAMPLE_INTERVAL_MS));
         }
-        let emulated_point =
-            self.emulated_profile
-                .point_at(self.surf_ref, LIVE_SIM_SAMPLE_INTERVAL_MS, self.emulation_sample_index);
+        let emulated_point = self.emulated_profile.point_at(
+            self.surf_ref,
+            LIVE_SIM_SAMPLE_INTERVAL_MS,
+            self.emulation_sample_index,
+        );
         Some(emulated_point.depth_pa)
     }
 }
@@ -508,7 +510,14 @@ where
 #[cfg(feature = "live_sim")]
 impl<I, P> LiveSimEmulationControl for LiveSimMS5849<I, P> {
     fn enter_live_sim(&mut self, _surface_pressure: Pa) {
-        self.emulated_profile = EmulatedDiveProfile::deep_with_defaults(LIVE_SIM_SAMPLE_INTERVAL_MS);
+        self.surf_ref = _surface_pressure;
+        #[cfg(feature = "live_sim_20m")]
+        self.emulated_profile =
+            EmulatedDiveProfile::shallow_20m_with_defaults(LIVE_SIM_SAMPLE_INTERVAL_MS);
+        #[cfg(not(feature = "live_sim_20m"))]
+        self.emulated_profile =
+            EmulatedDiveProfile::deep_with_defaults(LIVE_SIM_SAMPLE_INTERVAL_MS);
+
         self.emulation_active = true;
         self.emulation_sample_index = 0;
         self.emulation_last_tick_ms = Mono::now().ticks() as u32;
@@ -525,17 +534,19 @@ impl<I, P> LiveSimEmulationControl for LiveSimMS5849<I, P> {
             self.emulated_profile = self.emulated_profile.without_deco_overlay();
         } else {
             let mut absolute_overlay = overlay;
-            let current_point = self
-                .emulated_profile
-                .point_at(
-                    self.surf_ref,
-                    LIVE_SIM_SAMPLE_INTERVAL_MS,
-                    self.emulation_sample_index,
-                );
+            let current_point = self.emulated_profile.point_at(
+                self.surf_ref,
+                LIVE_SIM_SAMPLE_INTERVAL_MS,
+                self.emulation_sample_index,
+            );
             let mut previous_depth = current_point.depth_pa;
             let mut current_start = self.emulation_sample_index;
 
-            for stop in absolute_overlay.stops.iter_mut().take(absolute_overlay.count) {
+            for stop in absolute_overlay
+                .stops
+                .iter_mut()
+                .take(absolute_overlay.count)
+            {
                 let previous_depth_m = previous_depth.to_msw().to_f32();
                 let stop_depth_m = stop.stop_depth_pa.to_msw().to_f32();
                 let transit_depth_m = (previous_depth_m - stop_depth_m).max(0.0);
@@ -554,7 +565,9 @@ impl<I, P> LiveSimEmulationControl for LiveSimMS5849<I, P> {
                 previous_depth = stop.stop_depth_pa;
             }
 
-            self.emulated_profile = self.emulated_profile.with_deco_overlay_obj(absolute_overlay);
+            self.emulated_profile = self
+                .emulated_profile
+                .with_deco_overlay_obj(absolute_overlay);
         }
     }
 }

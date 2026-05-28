@@ -43,7 +43,9 @@ impl DiveTaskState {
             last_deco_update_millis: start_millis,
             last_deco_update_depth: start_depth,
             last_display_refresh_millis: start_millis,
-            display_refresh_rate_algorithm: FixedRateAlgorithm::new(DIVE_DISPLAY_REFRESH_INTERVAL_MILLIS),
+            display_refresh_rate_algorithm: FixedRateAlgorithm::new(
+                DIVE_DISPLAY_REFRESH_INTERVAL_MILLIS,
+            ),
         }
     }
 }
@@ -127,7 +129,13 @@ where
                 for i in 0..max_print {
                     let n2 = loading.n2[i];
                     let he = loading.he[i];
-                    rprintln!(" tissue {}: n2={:?}, he={:?}, total_inert={:?}", i, n2, he, (n2 + he));
+                    rprintln!(
+                        " tissue {}: n2={:?}, he={:?}, total_inert={:?}",
+                        i,
+                        n2,
+                        he,
+                        (n2 + he)
+                    );
                 }
                 // Compute max inert tissue and value
                 let mut max_idx: usize = 0;

@@ -1,6 +1,6 @@
+use core::time::Duration;
 use num::ToPrimitive;
 use rtt_target::rprintln;
-use core::time::Duration;
 use stdc_diving_algorithms::{
     deco_algorithm::{DecoSettings, MVALUES, TISSUES, update_model_state},
     dive::DiveMeasurement,
@@ -10,7 +10,10 @@ use stdc_diving_algorithms::{
     setup::NUM_TISSUES,
 };
 
-use stdc_stm32_rs::{components::dive_log::{GF_HIGH, GF_LOW}, constants::barometric::DepthOrAltitude};
+use stdc_stm32_rs::{
+    components::dive_log::{GF_HIGH, GF_LOW},
+    constants::barometric::DepthOrAltitude,
+};
 use stm32l4xx_hal::rtc::Rtc;
 
 #[cfg(feature = "live_sim")]
@@ -100,7 +103,17 @@ where
 
     let current_gas_mode_idx = CurrentDiveModeWithInfo::OC { gas_idx: 0 };
 
-    #[cfg(feature = "online_benchmarking")]
+    #[cfg(all(
+        feature = "live_sim_20m",
+        feature = "online_benchmarking",
+        target_os = "none"
+    ))]
+    benchmarking::log_session_start("dive.online_benchmarking.profile.shallow_20m");
+    #[cfg(all(
+        not(feature = "live_sim_20m"),
+        feature = "online_benchmarking",
+        target_os = "none"
+    ))]
     benchmarking::log_session_start("dive.online_benchmarking.profile.deep");
     #[cfg(feature = "online_benchmarking")]
     benchmarking::log_schema("summary.csv");
@@ -134,7 +147,10 @@ where
         if let Err(e) = crate::modes::flash_write_and_measure("flash.control.persist_pos", || {
             crate::persist_flash_log_position(flash, next_pos)
         }) {
-            rprintln!("Failed persisting flash position after control block: {:?}", e);
+            rprintln!(
+                "Failed persisting flash position after control block: {:?}",
+                e
+            );
         }
     }
 
@@ -299,7 +315,9 @@ pub fn write_flash_log<const NUM_GASES: usize>(
             runtime.last_logged_millis = flash_log.measurement_millis;
             runtime.last_logged_pressure = flash_log.pressure;
 
-            let next_pos = deco_start_addr.map(|addr| addr + 8).unwrap_or(basic_start_addr + 8);
+            let next_pos = deco_start_addr
+                .map(|addr| addr + 8)
+                .unwrap_or(basic_start_addr + 8);
             if let Err(e) = crate::modes::flash_write_and_measure("flash.point.persist_pos", || {
                 crate::persist_flash_log_position(flash, next_pos)
             }) {
@@ -334,7 +352,9 @@ fn handle_depth_measurement<const NR_GASES: usize>(
             *max_depth = pressure;
         }
 
-        let loading_pressure = previous_pressure.map(|prev| (prev + pressure) / 2.0).unwrap_or(pressure);
+        let loading_pressure = previous_pressure
+            .map(|prev| (prev + pressure) / 2.0)
+            .unwrap_or(pressure);
         let current_gas = current_gas_mode_idx.to_fixed_gas(gases, loading_pressure);
         let delta_time = Duration::from_millis(time_delta as u64);
         update_model_state(

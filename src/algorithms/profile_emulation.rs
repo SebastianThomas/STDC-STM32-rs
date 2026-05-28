@@ -42,7 +42,13 @@ impl Display for EmulationDecoOverlay {
         f.write_fmt(format_args!("DecoOverlay: count={} ", self.count))?;
         for i in 0..self.count.min(MAX_STOP_NUMS) {
             let s = &self.stops[i];
-            f.write_fmt(format_args!("[{}: depth={:?} samples={} start={:?}] ", i, s.stop_depth_pa.to_msw(), s.hold_samples, s.start_sample))?;
+            f.write_fmt(format_args!(
+                "[{}: depth={:?} samples={} start={:?}] ",
+                i,
+                s.stop_depth_pa.to_msw(),
+                s.hold_samples,
+                s.start_sample
+            ))?;
         }
         Ok(())
     }
@@ -153,6 +159,10 @@ impl EmulatedDiveProfile {
         Self::with_rates(msw::new(90.0).to_pa(), time_step_ms, 20.0, 10.0)
     }
 
+    pub fn shallow_20m_with_defaults(time_step_ms: u32) -> Self {
+        Self::with_rates(msw::new(20.0).to_pa(), time_step_ms, 20.0, 2.0)
+    }
+
     pub fn deco_start_sample(&self) -> usize {
         self.stage_lengths[0] + self.stage_lengths[1]
     }
@@ -201,7 +211,8 @@ impl EmulatedDiveProfile {
                 let stop_depth_m = overlay.stops[i].stop_depth_pa.to_msw().to_f32();
                 let transit_depth_m = (previous_depth_m - stop_depth_m).max(0.0);
                 if transit_depth_m > 0.0 {
-                    let transit_secs = (transit_depth_m / DECO_TRANSIT_ASCENT_RATE_M_PER_MIN) * 60.0;
+                    let transit_secs =
+                        (transit_depth_m / DECO_TRANSIT_ASCENT_RATE_M_PER_MIN) * 60.0;
                     hold_samples +=
                         libm::ceilf((transit_secs * 1000.0) / self.sample_interval_ms as f32)
                             as usize;
@@ -315,8 +326,7 @@ impl EmulatedDiveProfile {
                                 let transit_secs =
                                     (transit_depth_m / DECO_TRANSIT_ASCENT_RATE_M_PER_MIN) * 60.0;
                                 libm::ceilf(
-                                    (transit_secs * 1000.0)
-                                        / self.sample_interval_ms as f32,
+                                    (transit_secs * 1000.0) / self.sample_interval_ms as f32,
                                 ) as usize
                             } else {
                                 0

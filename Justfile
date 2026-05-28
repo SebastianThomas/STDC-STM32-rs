@@ -82,7 +82,11 @@ embed-bench-log:
 embed-live-sim-log:
 	# Keep the log-processing step alive even if cargo embed is interrupted with Ctrl-C.
 	NO_COLOR=1 CARGO_TERM_COLOR=never JUST_EMBED_FEATURES=online_benchmarking,live_sim bash scripts/embed_live_sim_log.sh
-	
+
+embed-live-sim-log-20m:
+	# Live sim on the shorter 20 m / 2 min profile.
+	NO_COLOR=1 CARGO_TERM_COLOR=never JUST_EMBED_FEATURES=online_benchmarking,live_sim,live_sim_20m bash scripts/embed_live_sim_log.sh
+
 ci:
 	just c
 	just t

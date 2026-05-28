@@ -408,7 +408,7 @@ where
         Ok(())
     }
 
-    fn draw_scaled_text_at(
+    fn draw_scaled_text_block(
         &mut self,
         x: u8,
         y: u8,
@@ -420,13 +420,59 @@ where
         if scale == 0 {
             return Err(SpiError::new(0, "Text scale must be greater than zero"));
         }
+
         let char_advance = (FONT_WIDTH + FONT_SPACING) as u16 * scale as u16;
         let max_chars = (max_width as u16 / char_advance) as usize;
         let draw_len = text.len().min(max_chars);
+        if draw_len == 0 {
+            return Ok(());
+        }
 
-        for (idx, byte) in text.iter().take(draw_len).enumerate() {
-            let dx = x as u16 + idx as u16 * char_advance;
-            self.draw_scaled_char_batched(dx as u8, y, *byte, scale, color)?;
+        let text_width = measure_text_width(draw_len, scale);
+        let text_height = (FONT_HEIGHT * scale) as u16;
+        let x_end = x as u16 + text_width - 1;
+        let y_end = y as u16 + text_height - 1;
+        self.ssd1353_set_window(x, y, x_end as u8, y_end as u8)?;
+        self.write_command(CMD_WRITE_RAM)?;
+        self.set_data_mode()?;
+
+        let fg_hi = (color >> 8) as u8;
+        let fg_lo = (color & 0xFF) as u8;
+        let bg_hi = (COLOR_BLACK >> 8) as u8;
+        let bg_lo = (COLOR_BLACK & 0xFF) as u8;
+        let row_bytes = text_width as usize * 2;
+        let mut row = [0u8; 192];
+
+        for glyph_row in 0..FONT_HEIGHT as usize {
+            for _scale_row in 0..scale as usize {
+                let mut offset = 0usize;
+                for (idx, byte) in text.iter().take(draw_len).enumerate() {
+                    let glyph = glyph_5x7(*byte);
+                    for col in 0..FONT_WIDTH as usize {
+                        let bit_on = (glyph[col] >> glyph_row) & 0x01 != 0;
+                        let (r_hi, r_lo) = if bit_on {
+                            (fg_hi, fg_lo)
+                        } else {
+                            (bg_hi, bg_lo)
+                        };
+                        for _ in 0..scale as usize {
+                            row[offset] = r_hi;
+                            row[offset + 1] = r_lo;
+                            offset += 2;
+                        }
+                    }
+
+                    if idx + 1 < draw_len {
+                        for _ in 0..FONT_SPACING as usize * scale as usize {
+                            row[offset] = bg_hi;
+                            row[offset + 1] = bg_lo;
+                            offset += 2;
+                        }
+                    }
+                }
+
+                self.write_data_raw(&row[..row_bytes])?;
+            }
         }
 
         Ok(())
@@ -456,7 +502,7 @@ where
         let copy_len = text.len().min(draw_len).min(draw_buf.len());
         draw_buf[..copy_len].copy_from_slice(&text[..copy_len]);
 
-        self.draw_scaled_text_at(x, y, &draw_buf[..draw_len], scale, color, max_width)
+        return self.draw_scaled_text_block(x, y, &draw_buf[..draw_len], scale, color, max_width);
     }
 
     pub fn ssd1353_show_depth_and_dive_time(

@@ -98,8 +98,17 @@ const BLUETOOTH_TASK_DELAY_MILLIS: u64 = 200;
 #[cfg(not(feature = "online_benchmarking"))]
 const STOP2_SURFACE_SLEEP_SECONDS: u32 = 2;
 
+#[cfg(feature = "live_sim_50m")]
+const NR_GASES: usize = 2;
+#[cfg(feature = "live_sim_50m")]
+const GASES: [GasMix<f32>; NR_GASES] = [gas::TMX18_45, gas::NX50];
+#[cfg(feature = "live_sim_50m")]
+const GASES_ENABLED: [bool; NR_GASES] = [true; NR_GASES];
+#[cfg(not(feature = "live_sim_50m"))]
 const NR_GASES: usize = 4;
+#[cfg(not(feature = "live_sim_50m"))]
 const GASES: [GasMix<f32>; NR_GASES] = [gas::AIR, gas::NX100, gas::NX50, gas::TMX10_80];
+#[cfg(not(feature = "live_sim_50m"))]
 const GASES_ENABLED: [bool; NR_GASES] = [true; 4];
 
 static POWER_CUT_RED_INDICATOR: CmMutex<RefCell<Option<Pc9Output>>> =

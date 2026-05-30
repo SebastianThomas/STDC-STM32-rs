@@ -126,8 +126,7 @@ fn format_depth_text(depth: msw, out: &mut [u8; 16]) -> usize {
     len
 }
 
-fn format_minutes_text(duration: Duration, out: &mut [u8; 16]) -> usize {
-    const D: usize = 3;
+fn format_minutes_text<const D: usize>(duration: Duration, out: &mut [u8; 16]) -> usize {
     let mut len = 0;
     let minutes = core::cmp::min(duration.as_secs() / 60, 999) as u32;
     // write digits into a small temp buffer then copy right-aligned into out
@@ -564,7 +563,7 @@ where
         let mut stop_time_label = [0u8; 16];
         let mut tts_label = [0u8; 16];
         let depth_len = format_depth_text(state.depth, &mut depth_label);
-        let time_len = format_minutes_text(state.dive_time, &mut time_label);
+        let time_len = format_minutes_text::<3>(state.dive_time, &mut time_label);
 
         let prev_depth_len = self.depth_cache_len();
         let prev_time_len = self.time_cache_len();
@@ -587,8 +586,8 @@ where
                 // TODO: The actual ceiling could be derived from tissue loading here; stop depth is
                 //  the available proxy for now.
                 deco_len = format_depth_text(first_stop.depth(), &mut deco_label);
-                stop_time_len = format_minutes_text(first_stop.duration(), &mut stop_time_label);
-                tts_len = format_minutes_text(
+                stop_time_len = format_minutes_text::<3>(first_stop.duration(), &mut stop_time_label);
+                tts_len = format_minutes_text::<3>(
                     stop_schedule.get_deco_tts(&ascent_rate_per_meter),
                     &mut tts_label,
                 );
@@ -599,7 +598,7 @@ where
             } else {
                 deco_len = 0;
                 stop_time_len = format_ndl_text(&mut stop_time_label);
-                tts_len = format_minutes_text(
+                tts_len = format_minutes_text::<3>(
                     get_ascent_time(state.depth, &ascent_rate_per_meter),
                     &mut tts_label,
                 );

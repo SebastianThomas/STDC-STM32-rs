@@ -22,9 +22,9 @@ on_signal() {
 trap on_signal INT TERM
 
 if [[ -n "${JUST_EMBED_FEATURES:-}" ]]; then
-	script -q "$raw_log" env JUST_EMBED_FEATURES="$JUST_EMBED_FEATURES" cargo embed --disable-progressbars --features "$JUST_EMBED_FEATURES"
+	env JUST_EMBED_FEATURES="$JUST_EMBED_FEATURES" cargo embed --disable-progressbars --features "$JUST_EMBED_FEATURES" 2>&1 | tee "$raw_log"
 else
-	script -q "$raw_log" cargo embed --disable-progressbars
+	cargo embed --disable-progressbars 2>&1 | tee "$raw_log"
 fi
 
 cargo_status=$?

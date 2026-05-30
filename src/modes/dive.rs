@@ -104,13 +104,19 @@ where
     let current_gas_mode_idx = CurrentDiveModeWithInfo::OC { gas_idx: 0 };
 
     #[cfg(all(
+        feature = "live_sim_50m",
+        feature = "online_benchmarking",
+        target_os = "none"
+    ))]
+    benchmarking::log_session_start("dive.online_benchmarking.profile.mid_50m");
+    #[cfg(all(
         feature = "live_sim_20m",
         feature = "online_benchmarking",
         target_os = "none"
     ))]
     benchmarking::log_session_start("dive.online_benchmarking.profile.shallow_20m");
     #[cfg(all(
-        not(feature = "live_sim_20m"),
+        feature = "live_sim_90m",
         feature = "online_benchmarking",
         target_os = "none"
     ))]
@@ -213,6 +219,13 @@ where
                 measurement_millis,
             );
             rprintln!("Handling depth measurement {:?} at {:?}", pressure, depth);
+            // Machine-parseable profile line for extract_bench_tables.py
+            rprintln!(
+                "PROFILE time_ms={} pa={} msw={} ",
+                measurement_millis,
+                pressure.to_pa().to_f32(),
+                depth.to_msw().to_f32()
+            );
             handle_depth_measurement(
                 pressure,
                 depth,

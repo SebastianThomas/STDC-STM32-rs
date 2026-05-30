@@ -163,6 +163,12 @@ impl EmulatedDiveProfile {
         Self::with_rates(msw::new(20.0).to_pa(), time_step_ms, 20.0, 2.0)
     }
 
+    /// 20→50m profile without a predefined deco overlay. The live dive algorithm
+    /// must compute and provide deco stops at runtime via `sync_live_sim_dive_overlay`.
+    pub fn mid_50m_with_deco_defaults(time_step_ms: u32) -> Self {
+        Self::with_rates(msw::new(50.0).to_pa(), time_step_ms, 20.0, 15.0)
+    }
+
     pub fn deco_start_sample(&self) -> usize {
         self.stage_lengths[0] + self.stage_lengths[1]
     }
@@ -302,18 +308,19 @@ impl EmulatedDiveProfile {
     }
 
     pub fn depth_at(&self, surface_pa: Pa, sample_index: usize) -> Pa {
+        let max_depth_delta_pa = self.max_depth_delta_pa - msw::new(0.0).to_pa();
         let (stage, stage_progress) = self.stage_at(sample_index);
         match stage {
-            DiveStage::Descent => surface_pa + self.max_depth_delta_pa * stage_progress,
+            DiveStage::Descent => surface_pa + max_depth_delta_pa * stage_progress,
             DiveStage::Bottom => {
                 let wobble = sinf(stage_progress * core::f32::consts::TAU);
-                surface_pa + self.max_depth_delta_pa * (self.bottom_variation * wobble + 1.0)
+                surface_pa + max_depth_delta_pa * (self.bottom_variation * wobble + 1.0)
             }
             DiveStage::DecoHold => {
                 if let Some(overlay) = self.deco_overlay {
                     let deco_start = self.deco_start_sample();
                     let mut previous_end = deco_start;
-                    let mut previous_depth = surface_pa + self.max_depth_delta_pa;
+                    let mut previous_depth = surface_pa + max_depth_delta_pa;
                     for i in 0..overlay.count.min(MAX_STOP_NUMS) {
                         let s = &overlay.stops[i];
                         let start = if let Some(start_sample) = s.start_sample {
@@ -349,7 +356,7 @@ impl EmulatedDiveProfile {
                 }
                 surface_pa
             }
-            DiveStage::Ascent => surface_pa + self.max_depth_delta_pa * (1.0 - stage_progress),
+            DiveStage::Ascent => surface_pa + max_depth_delta_pa * (1.0 - stage_progress),
         }
     }
 
@@ -361,12 +368,13 @@ impl EmulatedDiveProfile {
     ) -> EmulatedDivePoint {
         let (stage, _) = self.stage_at(sample_index);
         let depth_pa = self.depth_at(surface, sample_index);
+        let depth_msw = (depth_pa - surface).to_msw();
         EmulatedDivePoint {
             sample_index,
             time_ms: sample_index as u32 * time_step_ms,
             stage,
             depth_pa,
-            depth_msw: depth_pa.to_msw(),
+            depth_msw,
         }
     }
 }
@@ -402,5 +410,24 @@ mod tests {
         assert!(first_stop > second_stop);
         assert!(between_stops < first_stop && between_stops > second_stop);
         assert!(second_stop > 0.0);
+    }
+
+    #[test]
+    fn point_at_reports_depth_relative_to_surface() {
+        let profile = EmulatedDiveProfile::mid_50m_with_deco_defaults(1_000);
+        let surface = Pa::new(101_325.0);
+        let bottom = profile.point_at(surface, 1_000, profile.stage_lengths[0]);
+
+        assert!((bottom.depth_msw.to_f32() - 50.0).abs() < 0.25);
+        assert!(bottom.depth_pa.to_f32() > surface.to_f32());
+    }
+
+    #[test]
+    fn shallow_profile_targets_20m() {
+        let profile = EmulatedDiveProfile::shallow_20m_with_defaults(1_000);
+        let surface = Pa::new(101_325.0);
+        let bottom = profile.point_at(surface, 1_000, profile.stage_lengths[0]);
+
+        assert!((bottom.depth_msw.to_f32() - 20.0).abs() < 0.25);
     }
 }

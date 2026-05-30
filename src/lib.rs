@@ -5,6 +5,21 @@
 #![allow(unused_features)]
 #![feature(generic_const_exprs)]
 
+#[cfg(all(
+	feature = "live_sim",
+	not(any(feature = "live_sim_90m", feature = "live_sim_20m", feature = "live_sim_50m"))
+))]
+compile_error!("enable exactly one live-sim profile feature: live_sim_90m, live_sim_20m, or live_sim_50m");
+
+#[cfg(all(feature = "live_sim", feature = "live_sim_90m", feature = "live_sim_20m"))]
+compile_error!("enable only one live-sim profile feature at a time");
+
+#[cfg(all(feature = "live_sim", feature = "live_sim_90m", feature = "live_sim_50m"))]
+compile_error!("enable only one live-sim profile feature at a time");
+
+#[cfg(all(feature = "live_sim", feature = "live_sim_20m", feature = "live_sim_50m"))]
+compile_error!("enable only one live-sim profile feature at a time");
+
 pub mod algorithms;
 pub mod benchmarking;
 pub mod constants;

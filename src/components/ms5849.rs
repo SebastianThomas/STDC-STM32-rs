@@ -53,7 +53,7 @@ use crate::algorithms::profile_emulation::EmulationDecoOverlay;
 #[cfg(feature = "live_sim")]
 const DECO_TRANSIT_ASCENT_RATE_M_PER_MIN: f32 = 9.0;
 #[cfg(feature = "live_sim")]
-const LIVE_SIM_SAMPLE_INTERVAL_MS: u32 = 1_000;
+const LIVE_SIM_SAMPLE_INTERVAL_MS: u32 = 200;
 
 pub trait LiveSimEmulationControl {
     fn enter_live_sim(&mut self, _surface_pressure: Pa) {}
@@ -511,12 +511,24 @@ where
 impl<I, P> LiveSimEmulationControl for LiveSimMS5849<I, P> {
     fn enter_live_sim(&mut self, _surface_pressure: Pa) {
         self.surf_ref = _surface_pressure;
+        #[cfg(feature = "live_sim_50m")]
+        {
+            use crate::algorithms::profile_emulation::EmulatedDiveProfile;
+
+            self.emulated_profile = EmulatedDiveProfile::mid_50m_with_deco_defaults(
+                LIVE_SIM_SAMPLE_INTERVAL_MS,
+            );
+        }
         #[cfg(feature = "live_sim_20m")]
-        self.emulated_profile =
-            EmulatedDiveProfile::shallow_20m_with_defaults(LIVE_SIM_SAMPLE_INTERVAL_MS);
-        #[cfg(not(feature = "live_sim_20m"))]
-        self.emulated_profile =
-            EmulatedDiveProfile::deep_with_defaults(LIVE_SIM_SAMPLE_INTERVAL_MS);
+        {
+            self.emulated_profile =
+                EmulatedDiveProfile::shallow_20m_with_defaults(LIVE_SIM_SAMPLE_INTERVAL_MS);
+        }
+        #[cfg(feature = "live_sim_90m")]
+        {
+            self.emulated_profile =
+                EmulatedDiveProfile::deep_with_defaults(LIVE_SIM_SAMPLE_INTERVAL_MS);
+        }
 
         self.emulation_active = true;
         self.emulation_sample_index = 0;
@@ -539,7 +551,7 @@ impl<I, P> LiveSimEmulationControl for LiveSimMS5849<I, P> {
                 LIVE_SIM_SAMPLE_INTERVAL_MS,
                 self.emulation_sample_index,
             );
-            let mut previous_depth = current_point.depth_pa;
+            let mut previous_depth = current_point.depth_msw.to_pa();
             let mut current_start = self.emulation_sample_index;
 
             for stop in absolute_overlay

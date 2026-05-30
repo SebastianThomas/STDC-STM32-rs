@@ -9,7 +9,6 @@ use crate::components::spi_utils::SpiError;
 const STATUS_DEPTH_CACHE_LEN: usize = 8;
 // Minute fields are fixed-width D=3 (right-aligned), so use 3 bytes
 const STATUS_MINUTES_LEN: usize = 3;
-const STATUS_LABEL_CACHE_LEN: usize = STATUS_MINUTES_LEN;
 
 pub struct SpiDisplay<SPI, PINS, EN: OutputPin, RST: OutputPin, NDC: OutputPin> {
     power_enable: EN,

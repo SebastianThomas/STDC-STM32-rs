@@ -15,6 +15,20 @@ SAMPLE_RE = re.compile(r"bench_sample,label=([^,\s]+),cycles=(\d+),nanos=(\d+)")
 DECISION_RE = re.compile(r"bench_decision,label=([^,\s]+),due=(true|false)(?:,skipped_ms=(\d+))?")
 SESSION_RE = re.compile(r"bench_session,name=([^,\s]+)")
 SCHEMA_RE = re.compile(r"bench_schema,name=([^,\s]+)")
+# Various debug prints include time and depth in slightly different formats. Cover common cases:
+#  - EmulatedDivePoint debug: "time_ms: 12345" and "depth_msw: msw(12.34)"
+#  - DiveMeasurement debug: "time_ms: 12345" and "depth: Pa(101325.0)" (convert Pa->msw if possible)
+#  - Generic prints like "... at 12.34 m" or "depth=12.34"
+TIME_MS_RE = re.compile(r"time_ms\s*[:=]\s*(\d+)")
+DEPTH_MEASUREMENT_RE = re.compile(
+    r"Handling depth measurement\s+Pa\(([-+]?[0-9]*\.?[0-9]+)\)\s+at\s+msw\(([-+]?[0-9]*\.?[0-9]+)\)"
+)
+DEPTH_MSW_RE = re.compile(r"depth_msw\s*[:=]\s*msw\(([-+]?[0-9]*\.?[0-9]+)\)")
+DEPTH_PA_RE = re.compile(r"depth\s*[:=]\s*Pa\(([-+]?[0-9]*\.?[0-9]+)\)")
+DEPTH_M_RE = re.compile(r"(?:at|depth=)\s*([-+]?[0-9]*\.?[0-9]+)\s*m")
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\a]*(?:\a|\x1b\\)|\x1b[@-_]")
+DIVE_PRESSURE_RE = re.compile(r"Dive mode pressure:\s*Pa\(([-+]?[0-9]*\.?[0-9]+)\)")
+PROFILE_RE = re.compile(r"PROFILE\s+time_ms=(\d+)\s+pa=([-+]?[0-9]*\.?[0-9]+)\s+msw=([-+]?[0-9]*\.?[0-9]+)")
 
 VALID_SAMPLE_LABELS = {
     "dive.rate_and_logging",
@@ -205,6 +219,143 @@ def write_decision_csv(path: Path, decisions: list[Decision]) -> None:
             ])
 
 
+def write_profile_csv(path: Path, log_text: str) -> None:
+    # Try to find surface pressure to convert Pa -> meters. Default to 101325 Pa.
+    surface_pa = 101325.0
+    m = re.search(r"Start Pressure:\s*([0-9]+\.?[0-9]*)\s*Pa", log_text)
+    if m:
+        try:
+            surface_pa = float(m.group(1))
+        except Exception:
+            pass
+
+    records: list[tuple[int, float]] = []
+    used_times: set[int] = set()
+    sample_index = 0
+
+    # 1) Global match of explicit Handling depth measurement entries. Require a nearby time anchor.
+    # 0) Prefer explicit PROFILE lines emitted by firmware
+    for pm in PROFILE_RE.finditer(log_text):
+        try:
+            time_ms = int(pm.group(1))
+            msw_val = float(pm.group(3))
+        except Exception:
+            continue
+        if not (0.0 <= msw_val <= 200.0):
+            continue
+        if time_ms not in used_times:
+            records.append((time_ms, msw_val))
+            used_times.add(time_ms)
+
+    # If PROFILE lines are available, trust only those to avoid heuristic outliers.
+    if records:
+        records.sort(key=lambda x: x[0])
+        with path.open("w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["time_ms", "depth_m"])
+            for t, d in records:
+                writer.writerow([t, f"{d:.3f}"])
+        return
+
+    for match in DEPTH_MEASUREMENT_RE.finditer(log_text):
+        try:
+            msw_val = float(match.group(2))
+        except Exception:
+            continue
+        start = max(0, match.start() - 200)
+        end = min(len(log_text), match.end() + 200)
+        time_search = TIME_MS_RE.search(log_text, start, end)
+        if not time_search:
+            # no time nearby — skip, we require time for reliable extraction
+            continue
+        time_ms = int(time_search.group(1))
+        # sanity-check msw
+        if not (0.0 <= msw_val <= 200.0):
+            continue
+        if time_ms not in used_times:
+            records.append((time_ms, msw_val))
+            used_times.add(time_ms)
+
+    # 2) Find time_ms anchors and look ahead for msw/Pa within a window.
+    for tmatch in TIME_MS_RE.finditer(log_text):
+        try:
+            time_ms = int(tmatch.group(1))
+        except Exception:
+            continue
+        if time_ms in used_times:
+            continue
+        start = tmatch.end()
+        end = min(len(log_text), start + 400)
+        window = log_text[start:end]
+        dm = DEPTH_MSW_RE.search(window)
+        dp = DEPTH_PA_RE.search(window)
+        if dm:
+            try:
+                depth_m = float(dm.group(1))
+                if 0.0 <= depth_m <= 200.0:
+                    records.append((time_ms, depth_m))
+                used_times.add(time_ms)
+                continue
+            except Exception:
+                pass
+        if dp:
+            try:
+                pa = float(dp.group(1))
+                depth_m = max(0.0, (pa - surface_pa) / 10057.7)
+                if 0.0 <= depth_m <= 200.0:
+                    records.append((time_ms, depth_m))
+                used_times.add(time_ms)
+                continue
+            except Exception:
+                pass
+
+    # 3) Catch 'Dive mode pressure' tokens and find nearby time_ms.
+    for dmatch in DIVE_PRESSURE_RE.finditer(log_text):
+        try:
+            pa = float(dmatch.group(1))
+        except Exception:
+            continue
+        start = max(0, dmatch.start() - 200)
+        end = min(len(log_text), dmatch.end() + 200)
+        time_search = TIME_MS_RE.search(log_text, start, end)
+        if time_search:
+            time_ms = int(time_search.group(1))
+        else:
+            # require a time anchor for dive-pressure entries
+            continue
+        depth_m = max(0.0, (pa - surface_pa) / 10057.7)
+        if not (0.0 <= depth_m <= 200.0):
+            continue
+        if time_ms not in used_times:
+            records.append((time_ms, depth_m))
+            used_times.add(time_ms)
+
+    # Sort records by time
+    records.sort(key=lambda x: x[0])
+
+    # Write CSV
+    with path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["time_ms", "depth_m"])
+        for t, d in records:
+            writer.writerow([t, f"{d:.3f}"])
+
+
+def derive_profile_tag(sessions: list[str]) -> str | None:
+    if not sessions:
+        return None
+
+    session = ANSI_RE.sub("", sessions[-1])
+    if ".shallow_20m" in session:
+        return "20m-2min"
+    if ".mid_50m" in session:
+        return "50m-15min"
+    if ".deep" in session:
+        return "90m-10min"
+    return None
+
+
+
 def write_manifest(path: Path, log_path: Path, samples: list[Sample], decisions: list[Decision], sessions: list[str], schemas: list[str]) -> None:
     with path.open("w") as file:
         file.write(f"log_file={log_path}\n")
@@ -227,18 +378,26 @@ def main() -> int:
         return 1
 
     log_text = log_path.read_text(errors="replace")
-    samples, decisions, sessions, schemas = extract_records(log_text)
+    # Normalize carriage-returns used by progress bars into real line breaks and strip ANSI.
+    cleaned_log = ANSI_RE.sub("", log_text).replace('\r', '\n')
+    samples, decisions, sessions, schemas = extract_records(cleaned_log)
 
     output_dir = log_path.with_suffix("")
-    output_dir = output_dir.parent / f"{output_dir.name}.tables"
+    profile_tag = derive_profile_tag(sessions)
+    if profile_tag:
+        output_dir = output_dir.parent / f"{output_dir.name}.{profile_tag}.tables"
+    else:
+        output_dir = output_dir.parent / f"{output_dir.name}.tables"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     write_summary_csv(output_dir / "summary.csv", samples)
     write_decision_csv(output_dir / "decision.csv", decisions)
+    write_profile_csv(output_dir / "profile.csv", cleaned_log)
     write_manifest(output_dir / "manifest.txt", log_path, samples, decisions, sessions, schemas)
 
     print(f"summary table: {output_dir / 'summary.csv'}")
     print(f"decision table: {output_dir / 'decision.csv'}")
+    print(f"profile table: {output_dir / 'profile.csv'}")
     print(f"manifest: {output_dir / 'manifest.txt'}")
     return 0
 

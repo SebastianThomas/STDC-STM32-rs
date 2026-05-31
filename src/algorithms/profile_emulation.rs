@@ -418,7 +418,10 @@ mod tests {
         let surface = Pa::new(101_325.0);
         let bottom = profile.point_at(surface, 1_000, profile.stage_lengths[0]);
 
-        assert!((bottom.depth_msw.to_f32() - 50.0).abs() < 0.25);
+        let expected_relative_depth = (profile.max_depth_delta_pa() - surface).to_msw();
+
+        assert_eq!(bottom.stage, DiveStage::Bottom);
+        assert!((bottom.depth_msw.to_f32() - expected_relative_depth.to_f32()).abs() < 0.25);
         assert!(bottom.depth_pa.to_f32() > surface.to_f32());
     }
 
@@ -428,6 +431,9 @@ mod tests {
         let surface = Pa::new(101_325.0);
         let bottom = profile.point_at(surface, 1_000, profile.stage_lengths[0]);
 
-        assert!((bottom.depth_msw.to_f32() - 20.0).abs() < 0.25);
+        let expected_relative_depth = (profile.max_depth_delta_pa() - surface).to_msw();
+
+        assert_eq!(bottom.stage, DiveStage::Bottom);
+        assert!((bottom.depth_msw.to_f32() - expected_relative_depth.to_f32()).abs() < 0.25);
     }
 }

@@ -42,42 +42,9 @@ embed:
 	# Example: just features=online_benchmarking,bluetooth,display embed
 	if [[ -n "{{features}}" ]]; then cargo embed --features "{{features}}"; else cargo embed; fi
 
-embed-no-progress:
-	# Same as embed, but with progress bars disabled for cleaner log capture
-	if [[ -n "{{features}}" ]]; then cargo embed --disable-progressbars --features "{{features}}"; else cargo embed --disable-progressbars; fi
-
-embed-clean-log:
-	# Capture raw output, strip terminal control codes, and drop progress-only lines
-	mkdir -p target
-	raw_log=target/rtt-clean-$(date +%Y%m%d-%H%M%S).raw.log; \
-	clean_log=target/rtt-clean-$(date +%Y%m%d-%H%M%S).log; \
-	NO_COLOR=1 CARGO_TERM_COLOR=never just features=online_benchmarking,live_sim embed-no-progress 2>&1 | tee "$raw_log" || true; \
-	perl -pe 's/\r\n?/\n/g; s/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\e\][^\a]*(?:\a|\e\\)//g; s/\e[@-_]//g' "$raw_log" \
-	| sed '/^[[:space:]]*$/d;/Erasing/d;/Programming/d;/Config default/d;/Target [[:space:]]/d;/^░/d;/^⠁/d;/^⠉/d;/^⠋/d;/^⠙/d;/^⠚/d;/^⠒/d;/^⠂/d;/^⠤/d;/^⠦/d;/^⠖/d;/^⠓/d;/^⠊/d;/^⠈/d;/^⠐/d;/^⠠/d;/^⠸/d;/^⠴/d;/^⠧/d;/^⠇/d;/^⠏/d' \
-	| awk 'NF { print; blank = 0; next } !blank { print; blank = 1 }' > "$clean_log"; \
-	python3 scripts/extract_bench_tables.py "$raw_log"; \
-	echo "raw log: $raw_log"; \
-	echo "clean log: $clean_log"; \
-	echo "tables dir: ${raw_log%.raw.log}.tables"
-
 embed-bench:
 	# Real sensor path + online benchmarking markers/logging
 	just features=online_benchmarking embed
-
-embed-live-sim:
-	# Live emulated dive path on device + online benchmarking markers/logging
-	just features=online_benchmarking,live_sim embed
-
-embed-bench-log:
-	mkdir -p target
-	raw_log=target/rtt-bench-$(date +%Y%m%d-%H%M%S).log; \
-	clean_log=${raw_log%.log}.clean.log; \
-	NO_COLOR=1 CARGO_TERM_COLOR=never just features=online_benchmarking embed-no-progress 2>&1 | tee "$raw_log" || true; \
-	perl -pe 's/\r\n?/\n/g; s/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\e\][^\a]*(?:\a|\e\\)//g; s/\e[@-_]//g' "$raw_log" > "$clean_log"; \
-	python3 scripts/extract_bench_tables.py "$raw_log"; \
-	echo "raw log: $raw_log"; \
-	echo "clean log: $clean_log"; \
-	echo "tables dir: ${raw_log%.log}.tables"
 
 embed-live-sim-log-90m:
 	# Live sim on the 90 m / 10 min profile.

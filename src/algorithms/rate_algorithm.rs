@@ -1,13 +1,19 @@
 use core::fmt::Debug;
 
+#[allow(unused_imports)]
 use stdc_diving_algorithms::pressure_unit::{Pa, Pressure, msw};
 
 const DIVE_DECO_UPDATE_MIN_INTERVAL_MILLIS: u32 = 5_000;
+#[cfg_attr(feature = "fixed_rate_algorithms", allow(dead_code))]
 const DIVE_DECO_UPDATE_MAX_INTERVAL_MILLIS: u32 = 30_000;
+#[cfg_attr(feature = "fixed_rate_algorithms", allow(dead_code))]
 const DIVE_DECO_SPEED_REFERENCE_M_PER_S: f32 = 0.60;
+#[cfg_attr(feature = "fixed_rate_algorithms", allow(dead_code))]
 const DIVE_DECO_DEPTH_REFERENCE_M: f32 = 40.0;
 const DIVE_O2TOX_UPDATE_MIN_INTERVAL_MILLIS: u32 = 10_000;
+#[cfg_attr(feature = "fixed_rate_algorithms", allow(dead_code))]
 const DIVE_O2TOX_UPDATE_MAX_INTERVAL_MILLIS: u32 = 120_000;
+#[cfg_attr(feature = "fixed_rate_algorithms", allow(dead_code))]
 const DIVE_O2TOX_DEPTH_REFERENCE_M: f32 = 60.0;
 
 pub trait RateAlgorithm<P, I, Output> {
@@ -148,9 +154,15 @@ impl<const WINDOW: usize> RateAlgorithm<(f32, u32), f32, u32>
     }
 }
 
+#[cfg(not(feature = "fixed_rate_algorithms"))]
 #[derive(Clone, Debug)]
 pub struct DecoUpdateRateAlgorithm(DynamicDiffAimdRateAlgorithm<5>);
 
+#[cfg(feature = "fixed_rate_algorithms")]
+#[derive(Clone, Debug)]
+pub struct DecoUpdateRateAlgorithm(FixedRateAlgorithm);
+
+#[cfg(not(feature = "fixed_rate_algorithms"))]
 impl Default for DecoUpdateRateAlgorithm {
     fn default() -> Self {
         DecoUpdateRateAlgorithm(DynamicDiffAimdRateAlgorithm::new(
@@ -165,6 +177,14 @@ impl Default for DecoUpdateRateAlgorithm {
     }
 }
 
+#[cfg(feature = "fixed_rate_algorithms")]
+impl Default for DecoUpdateRateAlgorithm {
+    fn default() -> Self {
+        DecoUpdateRateAlgorithm(FixedRateAlgorithm::new(DIVE_DECO_UPDATE_MIN_INTERVAL_MILLIS))
+    }
+}
+
+#[cfg(not(feature = "fixed_rate_algorithms"))]
 impl RateAlgorithm<(msw, u32), msw, u32> for DecoUpdateRateAlgorithm {
     type Error = ();
 
@@ -174,9 +194,24 @@ impl RateAlgorithm<(msw, u32), msw, u32> for DecoUpdateRateAlgorithm {
     }
 }
 
+#[cfg(feature = "fixed_rate_algorithms")]
+impl RateAlgorithm<(msw, u32), msw, u32> for DecoUpdateRateAlgorithm {
+    type Error = ();
+
+    fn next_iter(&mut self, prev: (msw, u32), instance: msw) -> Result<u32, Self::Error> {
+        self.0.next_iter(prev, instance)
+    }
+}
+
+#[cfg(not(feature = "fixed_rate_algorithms"))]
 #[derive(Clone, Debug)]
 pub struct O2ToxUpdateRateAlgorithm(DynamicDiffAimdRateAlgorithm<5>);
 
+#[cfg(feature = "fixed_rate_algorithms")]
+#[derive(Clone, Debug)]
+pub struct O2ToxUpdateRateAlgorithm(FixedRateAlgorithm);
+
+#[cfg(not(feature = "fixed_rate_algorithms"))]
 impl Default for O2ToxUpdateRateAlgorithm {
     fn default() -> Self {
         O2ToxUpdateRateAlgorithm(DynamicDiffAimdRateAlgorithm::new(
@@ -191,6 +226,14 @@ impl Default for O2ToxUpdateRateAlgorithm {
     }
 }
 
+#[cfg(feature = "fixed_rate_algorithms")]
+impl Default for O2ToxUpdateRateAlgorithm {
+    fn default() -> Self {
+        O2ToxUpdateRateAlgorithm(FixedRateAlgorithm::new(DIVE_O2TOX_UPDATE_MIN_INTERVAL_MILLIS))
+    }
+}
+
+#[cfg(not(feature = "fixed_rate_algorithms"))]
 impl RateAlgorithm<msw, msw, u32> for O2ToxUpdateRateAlgorithm {
     type Error = ();
 
@@ -200,6 +243,7 @@ impl RateAlgorithm<msw, msw, u32> for O2ToxUpdateRateAlgorithm {
     }
 }
 
+#[cfg(not(feature = "fixed_rate_algorithms"))]
 impl RateAlgorithm<(msw, u32), msw, u32> for O2ToxUpdateRateAlgorithm {
     type Error = ();
 
@@ -209,8 +253,32 @@ impl RateAlgorithm<(msw, u32), msw, u32> for O2ToxUpdateRateAlgorithm {
     }
 }
 
+#[cfg(feature = "fixed_rate_algorithms")]
+impl RateAlgorithm<msw, msw, u32> for O2ToxUpdateRateAlgorithm {
+    type Error = ();
+
+    fn next_iter(&mut self, prev: msw, instance: msw) -> Result<u32, Self::Error> {
+        self.0.next_iter(prev, instance)
+    }
+}
+
+#[cfg(feature = "fixed_rate_algorithms")]
+impl RateAlgorithm<(msw, u32), msw, u32> for O2ToxUpdateRateAlgorithm {
+    type Error = ();
+
+    fn next_iter(&mut self, prev: (msw, u32), instance: msw) -> Result<u32, Self::Error> {
+        self.0.next_iter(prev, instance)
+    }
+}
+
+#[cfg(not(feature = "fixed_rate_algorithms"))]
 pub struct FlashLogRateAlgorithm(DiffAimdRateAlgorithm<5>);
 
+#[cfg(feature = "fixed_rate_algorithms")]
+#[derive(Clone, Debug)]
+pub struct FlashLogRateAlgorithm(FixedRateAlgorithm);
+
+#[cfg(not(feature = "fixed_rate_algorithms"))]
 impl Default for FlashLogRateAlgorithm {
     fn default() -> Self {
         Self(DiffAimdRateAlgorithm::new(
@@ -224,6 +292,14 @@ impl Default for FlashLogRateAlgorithm {
     }
 }
 
+#[cfg(feature = "fixed_rate_algorithms")]
+impl Default for FlashLogRateAlgorithm {
+    fn default() -> Self {
+        Self(FixedRateAlgorithm::new(5_000))
+    }
+}
+
+#[cfg(not(feature = "fixed_rate_algorithms"))]
 impl RateAlgorithm<(Pa, u32), Pa, u32> for FlashLogRateAlgorithm {
     type Error = ();
     fn next_iter(&mut self, prev: (Pa, u32), instance: Pa) -> Result<u32, Self::Error> {
@@ -234,6 +310,16 @@ impl RateAlgorithm<(Pa, u32), Pa, u32> for FlashLogRateAlgorithm {
     }
 }
 
+#[cfg(feature = "fixed_rate_algorithms")]
+impl RateAlgorithm<(Pa, u32), Pa, u32> for FlashLogRateAlgorithm {
+    type Error = ();
+
+    fn next_iter(&mut self, prev: (Pa, u32), instance: Pa) -> Result<u32, Self::Error> {
+        self.0.next_iter(prev, instance)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct FixedRateAlgorithm {
     millis: u32,
 }

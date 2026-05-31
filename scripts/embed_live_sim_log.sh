@@ -2,7 +2,14 @@
 set -u
 
 mkdir -p target
-raw_log=target/rtt-live-sim-$(date +%Y%m%d-%H%M%S).log
+result_name=rtt-live-sim
+if [[ "${JUST_EMBED_FEATURES:-}" == *fixed_rate_algorithms* ]]; then
+	result_name=rtt-live-sim-fixed
+fi
+if [[ "${JUST_EMBED_PROFILE:-}" == "exp" ]]; then
+	result_name=${result_name}-exp
+fi
+raw_log=target/${result_name}-$(date +%Y%m%d-%H%M%S).log
 clean_log=${raw_log%.log}.clean.log
 interrupted=0
 
@@ -22,7 +29,11 @@ on_signal() {
 trap on_signal INT TERM
 
 if [[ -n "${JUST_EMBED_FEATURES:-}" ]]; then
-	env JUST_EMBED_FEATURES="$JUST_EMBED_FEATURES" cargo embed --disable-progressbars --features "$JUST_EMBED_FEATURES" 2>&1 | tee "$raw_log"
+	if [[ -n "${JUST_EMBED_NO_DEFAULT_FEATURES:-}" ]]; then
+		env JUST_EMBED_FEATURES="$JUST_EMBED_FEATURES" cargo embed --disable-progressbars --no-default-features --features "$JUST_EMBED_FEATURES" 2>&1 | tee "$raw_log"
+	else
+		env JUST_EMBED_FEATURES="$JUST_EMBED_FEATURES" cargo embed --disable-progressbars --features "$JUST_EMBED_FEATURES" 2>&1 | tee "$raw_log"
+	fi
 else
 	cargo embed --disable-progressbars 2>&1 | tee "$raw_log"
 fi

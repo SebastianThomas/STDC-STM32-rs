@@ -112,47 +112,6 @@ where
 
     match result {
         Ok(stops) => {
-            let first_stop = stops.first_stop();
-            let last_stop = stops
-                .stops()
-                .iter()
-                .rev()
-                .find(|stop| stop.duration().as_millis() > 0);
-            rprintln!("First stop (deepest): {:?}", first_stop);
-            rprintln!("Last used stop (shallowest): {:?}", last_stop);
-
-            #[cfg(feature = "live_sim")]
-            {
-                // Dump tissue loadings (a few tissues) and a summary to help debug
-                let max_print = 8usize.min(NUM_TISSUES);
-                rprintln!("Tissue loadings dump (first {} tissues):", max_print);
-                for i in 0..max_print {
-                    let n2 = loading.n2[i];
-                    let he = loading.he[i];
-                    rprintln!(
-                        " tissue {}: n2={:?}, he={:?}, total_inert={:?}",
-                        i,
-                        n2,
-                        he,
-                        (n2 + he)
-                    );
-                }
-                // Compute max inert tissue and value
-                let mut max_idx: usize = 0;
-                let mut max_val = loading.n2[0] + loading.he[0];
-                for i in 1..NUM_TISSUES {
-                    let val = loading.n2[i] + loading.he[i];
-                    if val > max_val {
-                        max_val = val;
-                        max_idx = i;
-                    }
-                }
-                rprintln!(
-                    "Tissue max inert at idx={} value={:?} (Pa)",
-                    max_idx,
-                    max_val
-                );
-            }
             let mut overlay = EmulationDecoOverlay {
                 stops: [EmulationDecoStop::none(); MAX_STOP_NUMS],
                 count: 0,
@@ -176,18 +135,6 @@ where
                 overlay.count += 1;
             }
             display_set_stop_schedule(stops);
-            rprintln!("----------");
-            rprintln!(
-                "Dive deco schedule updated: count={}, first_stop={:?}, last_stop={:?}",
-                overlay.count,
-                overlay.stops.first().copied(),
-                if overlay.count == 0 {
-                    None
-                } else {
-                    overlay.stops.get(overlay.count - 1).copied()
-                }
-            );
-            rprintln!("----------");
             #[cfg(feature = "online_benchmarking")]
             benchmarking::log_decision("dive.deco_schedule.rate", true, None);
             Some(overlay)

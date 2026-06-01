@@ -218,8 +218,10 @@ where
                 temperature_c,
                 measurement_millis,
             );
+            #[cfg(not(feature = "live_sim"))]
             rprintln!("Handling depth measurement {:?} at {:?}", pressure, depth);
             // Machine-parseable profile line for extract_bench_tables.py
+            #[cfg(feature = "live_sim")]
             rprintln!(
                 "PROFILE time_ms={} pa={} msw={} ",
                 measurement_millis,
@@ -248,11 +250,6 @@ where
                 &runtime.deco_settings,
                 &mut latest_calculations_state.deco.deco_rate_algorithm,
             );
-            #[cfg(feature = "live_sim")]
-            if let Some(deco_overlay) = deco_overlay {
-                rprintln!("New Deco Overlay: {:?}", deco_overlay);
-                ms5849_i2c.sync_live_sim_dive_overlay(deco_overlay);
-            }
 
             #[cfg(not(feature = "live_sim"))]
             let _ = deco_overlay;

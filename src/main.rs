@@ -715,6 +715,7 @@ mod app {
             modes::power_cut_mark_unsafe(modes::POWER_CUT_UNSAFE_TASK_RUNNING);
             sync_power_cut_indicator();
             sync_dive_mode_indicator(cx.local.dive_mode_indicator, cx.local.mode);
+            #[cfg(not(feature = "live_sim"))]
             rprintln!("Task Mode Tick in mode: {:?}", cx.local.mode);
 
             let result = benchmarking::measure_async_and_log("task.mode.tick.loop", async {

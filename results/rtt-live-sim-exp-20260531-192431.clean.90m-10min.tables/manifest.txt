@@ -1,4 +1,4 @@
-log_file=/Users/sebas/STDC/STDC_STM32/stdc_stm32_rs/target/rtt-live-sim-exp-20260531-192431.log
+log_file=/Users/sebas/STDC/STDC_STM32/stdc_stm32_rs/target/rtt-live-sim-exp-20260531-192431.clean.log
 bench_session=dive.onlne_benchmarking.profile.deepbech_schema
 bench_schema=summary.csv
 sample_count=35127

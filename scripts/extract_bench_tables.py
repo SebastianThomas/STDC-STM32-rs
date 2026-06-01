@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 SAMPLE_RE = re.compile(r"bench_sample,label=([^,\s]+),cycles=(\d+),nanos=(\d+)")
-DECISION_RE = re.compile(r"bench_decision,label=([^,\s]+),due=(true|false)(?:,skipped_ms=(\d+))?")
+DECISION_RE = re.compile(r"(?m)^bench_decision,label=([^,\s]+),due=(true|false)(?:,skipped_ms=(\d+))?")
 SESSION_RE = re.compile(r"bench_session,name=([^,\s]+)")
 SCHEMA_RE = re.compile(r"bench_schema,name=([^,\s]+)")
 # Various debug prints include time and depth in slightly different formats. Cover common cases:
@@ -29,6 +29,10 @@ DEPTH_M_RE = re.compile(r"(?:at|depth=)\s*([-+]?[0-9]*\.?[0-9]+)\s*m")
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\a]*(?:\a|\x1b\\)|\x1b[@-_]")
 DIVE_PRESSURE_RE = re.compile(r"Dive mode pressure:\s*Pa\(([-+]?[0-9]*\.?[0-9]+)\)")
 PROFILE_RE = re.compile(r"PROFILE\s+time_ms=(\d+)\s+pa=([-+]?[0-9]*\.?[0-9]+)\s+msw=([-+]?[0-9]*\.?[0-9]+)")
+PROFILE_OR_HANDLING_RE = re.compile(
+    r"Handling depth measurement\s+Pa\(([-+]?[0-9]*\.?[0-9]+)\)\s+at\s+msw\(([-+]?[0-9]*\.?[0-9]+)\)"
+    r"|PROFILE\s+time_ms=(\d+)\s+pa=([-+]?[0-9]*\.?[0-9]+)\s+msw=([-+]?[0-9]*\.?[0-9]+)"
+)
 
 VALID_SAMPLE_LABELS = {
     "dive.rate_and_logging",
@@ -63,6 +67,7 @@ class Decision:
     label: str
     due: bool
     skipped_ms: int
+    time_ms: int = 0  # wall-clock anchor from nearest preceding time_ms token (0 = unknown)
 
 
 def median_int(values: list[int]) -> int:
@@ -98,29 +103,40 @@ def summarize_samples(samples: list[Sample]) -> dict[str, int]:
 def summarize_decisions(decisions: list[Decision]) -> dict[str, float | int]:
     due = [decision for decision in decisions if decision.due]
     not_due = [decision for decision in decisions if not decision.due]
-    # skipped_ms values are reported when the decision was not due (i.e., skipped/delayed)
-    skipped_ms = [decision.skipped_ms for decision in not_due]
-    skipped_seconds = [value / 1000.0 for value in skipped_ms]
 
-    # NOTE: the recorded `skipped_ms` values are the *remaining time until the operation is due*
-    # when the decision was sampled as not-due. Summing those remaining-time values across many
-    # samples double-counts time and is misleading (produces large aggregated numbers).
-    # Therefore we do not report a meaningful "sum_skipped" here; keep per-sample stats instead.
+    # --- wall-clock seconds: derived from intervals between consecutive due=true events ---
+    # Sort due events by their time_ms anchor, ignoring records with no anchor (time_ms==0).
+    due_with_time = sorted(
+        [d for d in due if d.time_ms > 0],
+        key=lambda d: d.time_ms,
+    )
+    due_times_ms = [d.time_ms for d in due_with_time]
+    # Differences between successive due events give real inter-run wall-clock intervals.
+    intervals_ms = [
+        due_times_ms[i] - due_times_ms[i - 1]
+        for i in range(1, len(due_times_ms))
+        if due_times_ms[i] - due_times_ms[i - 1] > 0  # skip zero/negative (clock artefacts)
+    ]
+    intervals_s = [v / 1000.0 for v in intervals_ms]
+
+    sum_s = sum(intervals_s) if intervals_s else 0.0
+
     return {
         "count": len(decisions),
         "due_count": len(due),
         "not_due_count": len(decisions) - len(due),
-        # sum is intentionally zero to avoid implying a meaningful total wall-clock skipped time
-        "sum_skipped_ms": 0,
-        "min_skipped_ms": min(skipped_ms) if skipped_ms else 0,
-        "median_skipped_ms": median_float([float(value) for value in skipped_ms]),
-        "avg_skipped_ms": (sum(skipped_ms) / len(skipped_ms)) if skipped_ms else 0.0,
-        "max_skipped_ms": max(skipped_ms) if skipped_ms else 0,
-        "sum_skipped_seconds": 0.0,
-        "min_skipped_seconds": min(skipped_seconds) if skipped_seconds else 0.0,
-        "median_skipped_seconds": median_float(skipped_seconds),
-        "avg_skipped_seconds": (sum(skipped_seconds) / len(skipped_seconds)) if skipped_seconds else 0.0,
-        "max_skipped_seconds": max(skipped_seconds) if skipped_seconds else 0.0,
+        # wall-clock ms from inter-due intervals (accurate, no double-counting)
+        "sum_skipped_ms": sum(intervals_ms) if intervals_ms else 0,
+        "min_skipped_ms": min(intervals_ms) if intervals_ms else 0,
+        "median_skipped_ms": median_float([float(v) for v in intervals_ms]),
+        "avg_skipped_ms": (sum(intervals_ms) / len(intervals_ms)) if intervals_ms else 0.0,
+        "max_skipped_ms": max(intervals_ms) if intervals_ms else 0,
+        # wall-clock seconds from inter-due intervals (accurate, no double-counting)
+        "sum_skipped_seconds": sum_s,
+        "min_skipped_seconds": min(intervals_s) if intervals_s else 0.0,
+        "median_skipped_seconds": median_float(intervals_s),
+        "avg_skipped_seconds": (sum_s / len(intervals_s)) if intervals_s else 0.0,
+        "max_skipped_seconds": max(intervals_s) if intervals_s else 0.0,
     }
 
 
@@ -129,6 +145,9 @@ def extract_records(log_text: str) -> tuple[list[Sample], list[Decision], list[s
     decisions: list[Decision] = []
     sessions: list[str] = []
     schemas: list[str] = []
+    # Ensure concatenated bench tokens are split onto their own lines so partial writes
+    # don't produce torn numeric fields (e.g. "skipped_ms=12345bench_sample,...").
+    log_text = re.sub(r"(bench_sample,label=|bench_decision,label=|bench_session,name=|bench_schema,name=)", r"\n\1", log_text)
 
     for match in SAMPLE_RE.finditer(log_text):
         label = match.group(1)
@@ -137,11 +156,17 @@ def extract_records(log_text: str) -> tuple[list[Sample], list[Decision], list[s
     for match in DECISION_RE.finditer(log_text):
         label = match.group(1)
         if label in VALID_DECISION_LABELS:
+            # Search backward up to 2000 chars for the nearest time_ms anchor.
+            search_start = max(0, match.start() - 2000)
+            time_anchor = 0
+            for tm in TIME_MS_RE.finditer(log_text, search_start, match.start()):
+                time_anchor = int(tm.group(1))  # last match before this decision
             decisions.append(
                 Decision(
                     label,
                     match.group(2) == "true",
                     int(match.group(3) or 0),
+                    time_anchor,
                 )
             )
     for match in SESSION_RE.finditer(log_text):
@@ -231,23 +256,36 @@ def write_profile_csv(path: Path, log_text: str) -> None:
 
     records: list[tuple[int, float]] = []
     used_times: set[int] = set()
-    sample_index = 0
 
-    # 1) Global match of explicit Handling depth measurement entries. Require a nearby time anchor.
-    # 0) Prefer explicit PROFILE lines emitted by firmware
-    for pm in PROFILE_RE.finditer(log_text):
-        try:
-            time_ms = int(pm.group(1))
-            msw_val = float(pm.group(3))
-        except Exception:
+    # The live RTT stream can interleave partial writes, which occasionally tears a PROFILE line
+    # and drops digits from the depth value. Scan the stream in order and prefer the preceding
+    # handling-depth value when it is available.
+    pending_handling_depth: float | None = None
+
+    for match in PROFILE_OR_HANDLING_RE.finditer(log_text):
+        if match.group(1) is not None:
+            try:
+                pending_handling_depth = float(match.group(2))
+            except Exception:
+                pending_handling_depth = None
             continue
-        if not (0.0 <= msw_val <= 200.0):
+
+        try:
+            time_ms = int(match.group(3))
+            profile_depth = float(match.group(5))
+        except Exception:
+            pending_handling_depth = None
+            continue
+
+        depth_m = pending_handling_depth if pending_handling_depth is not None else profile_depth
+        pending_handling_depth = None
+
+        if not (0.0 <= depth_m <= 200.0):
             continue
         if time_ms not in used_times:
-            records.append((time_ms, msw_val))
+            records.append((time_ms, depth_m))
             used_times.add(time_ms)
 
-    # If PROFILE lines are available, trust only those to avoid heuristic outliers.
     if records:
         records.sort(key=lambda x: x[0])
         with path.open("w", newline="") as f:

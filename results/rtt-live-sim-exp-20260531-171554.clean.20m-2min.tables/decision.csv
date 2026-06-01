@@ -1,6 +1,6 @@
 # decision.csv summarizes scheduler decisions extracted from the log.
 # skipped values come from the RTT bench_decision lines, so the table tracks milliseconds rather than replay iterations.
 label,count,due_count,not_due_count,sum_skipped_ms,min_skipped_ms,median_skipped_ms,avg_skipped_ms,max_skipped_ms,sum_skipped_seconds,min_skipped_seconds,median_skipped_seconds,avg_skipped_seconds,max_skipped_seconds
-dive.deco_schedule.rate,7786,2021,5765,0,624,2877698.0,129585393.5,293884000013,0.000,0.624,2877.698,129585.393,293884000.013
-dive.display_refresh.rate,830,504,326,0,47,4773.0,41716.1,4710038,0.000,0.047,4.773,41.716,4710.038
-dive.o2_tox.rate,3581,19,3562,0,208,9144052.0,97263013.1,40644300067,0.000,0.208,9144.052,97263.013,40644300.067
+dive.deco_schedule.rate,150,98,52,392562,204,204.0,10904.5,29988,392.562,0.204,0.204,10.905,29.988
+dive.display_refresh.rate,66,47,19,395826,204,30192.0,35984.2,90580,395.826,0.204,30.192,35.984,90.580
+dive.o2_tox.rate,58,0,58,0,0,0.0,0.0,0,0.000,0.000,0.000,0.000,0.000

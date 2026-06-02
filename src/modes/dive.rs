@@ -446,12 +446,15 @@ fn flash_log_tick_plan(
     latest_measurements: &LatestMeasurements,
 ) -> Option<DiveFlashLog> {
     let elapsed_since_last_log = measurement_millis.saturating_sub(*last_logged_millis);
-    let next_log_time_delta =
-        flash_log_algorithm.next_iter((*last_logged_pressure, elapsed_since_last_log), pressure);
+    let next_log_time_delta = benchmarking::measure_and_log("flash.log.rate", || {
+        flash_log_algorithm.next_iter((*last_logged_pressure, elapsed_since_last_log), pressure)
+    });
     let next_iter_due_in = next_log_time_delta.map(|n| *last_logged_millis + n);
     match next_iter_due_in {
         Ok(next_iter) => {
             if measurement_millis > next_iter {
+                #[cfg(feature = "online_benchmarking")]
+                benchmarking::log_decision("flash.log.rate", true, None);
                 let _ = latest_measurements;
                 Some(DiveFlashLog {
                     measurement_millis,
@@ -459,6 +462,12 @@ fn flash_log_tick_plan(
                     measurement,
                 })
             } else {
+                #[cfg(feature = "online_benchmarking")]
+                benchmarking::log_decision(
+                    "flash.log.rate",
+                    false,
+                    Some(next_iter.saturating_sub(measurement_millis)),
+                );
                 None
             }
         }

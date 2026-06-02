@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import csv
 import re
 import statistics
@@ -43,6 +44,7 @@ VALID_SAMPLE_LABELS = {
     "dive.display_refresh",
     "flash.control.write",
     "flash.init.reset_pos",
+    "flash.log.rate",
     "flash.point.write",
     "flash.serial.write",
     "task.mode.tick.loop",
@@ -52,6 +54,7 @@ VALID_DECISION_LABELS = {
     "dive.deco_schedule.rate",
     "dive.o2_tox.rate",
     "dive.display_refresh.rate",
+    "flash.log.rate",
 }
 
 
@@ -153,14 +156,30 @@ def extract_records(log_text: str) -> tuple[list[Sample], list[Decision], list[s
         label = match.group(1)
         if label in VALID_SAMPLE_LABELS:
             samples.append(Sample(label, int(match.group(2)), int(match.group(3))))
+    # Build a global map of (log_position, time_ms) for all time_ms tokens in the
+    # preprocessed text.  RTT corruption can land PROFILE lines *after* the
+    # bench_decision they belong to, so a backward-only window misses them.
+    # Using nearest-by-position (in either direction) anchors almost every decision.
+    _time_map: list[tuple[int, int]] = [
+        (m.start(), int(m.group(1))) for m in TIME_MS_RE.finditer(log_text)
+    ]
+    _tm_positions: list[int] = [t[0] for t in _time_map]
+
+    def _nearest_time_anchor(pos: int) -> int:
+        if not _time_map:
+            return 0
+        i = bisect.bisect_left(_tm_positions, pos)
+        candidates: list[tuple[int, int]] = []
+        if i > 0:
+            candidates.append(_time_map[i - 1])
+        if i < len(_time_map):
+            candidates.append(_time_map[i])
+        return min(candidates, key=lambda t: abs(t[0] - pos))[1]
+
     for match in DECISION_RE.finditer(log_text):
         label = match.group(1)
         if label in VALID_DECISION_LABELS:
-            # Search backward up to 2000 chars for the nearest time_ms anchor.
-            search_start = max(0, match.start() - 2000)
-            time_anchor = 0
-            for tm in TIME_MS_RE.finditer(log_text, search_start, match.start()):
-                time_anchor = int(tm.group(1))  # last match before this decision
+            time_anchor = _nearest_time_anchor(match.start())
             decisions.append(
                 Decision(
                     label,

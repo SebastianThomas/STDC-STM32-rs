@@ -489,6 +489,7 @@ where
     samples
 }
 
+#[allow(dead_code)]
 fn collect_deco_rate_decision_samples(
     measurements: &[DiveMeasurement<Pa>],
     time_step_ms: u32,
@@ -512,6 +513,7 @@ fn collect_deco_rate_decision_samples(
     )
 }
 
+#[allow(dead_code)]
 fn collect_o2_rate_decision_samples(
     measurements: &[DiveMeasurement<Pa>],
     time_step_ms: u32,

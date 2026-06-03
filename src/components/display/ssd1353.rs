@@ -242,10 +242,10 @@ where
             }
         })?;
 
-        self.write_command(CMD_SLEEP_MODE_ON)?;      // 0xAE — Display OFF
+        self.write_command(CMD_SLEEP_MODE_ON)?; // 0xAE — Display OFF
 
-        self.write_command(CMD_SET_MUX_RATIO)?;      // 0xA8
-        self.write_data(&[0x7F])?;                  // 128 lines
+        self.write_command(CMD_SET_MUX_RATIO)?; // 0xA8
+        self.write_data(&[0x7F])?; // 128 lines
 
         self.write_command(CMD_SET_DISPLAY_OFFSET)?; // 0xA2
         self.write_data(&[0x00])?;
@@ -255,37 +255,37 @@ where
 
         self.write_command(CMD_SET_NORMAL_DISPLAY)?; // 0xA4 — pixels follow GDDRAM
 
-        self.write_command(CMD_SET_REMAP)?;          // 0xA0
-        self.write_data(&[0x64])?;                  // 65K color, horiz increment, RGB
+        self.write_command(CMD_SET_REMAP)?; // 0xA0
+        self.write_data(&[0x64])?; // 65K color, horiz increment, RGB
 
-        self.write_command(CMD_CONTRAST_A)?;         // 0x81 — Red
+        self.write_command(CMD_CONTRAST_A)?; // 0x81 — Red
         self.write_data(&[0x75])?;
-        self.write_command(CMD_CONTRAST_B)?;         // 0x82 — Green
+        self.write_command(CMD_CONTRAST_B)?; // 0x82 — Green
         self.write_data(&[0x60])?;
-        self.write_command(CMD_CONTRAST_C)?;         // 0x83 — Blue
+        self.write_command(CMD_CONTRAST_C)?; // 0x83 — Blue
         self.write_data(&[0x6A])?;
 
-        self.write_command(CMD_MASTER_CONTRAST)?;    // 0x87
+        self.write_command(CMD_MASTER_CONTRAST)?; // 0x87
         self.write_data(&[0x0F])?;
 
-        self.write_command(CMD_LINEAR_GRAYSCALE)?;   // 0xB9
+        self.write_command(CMD_LINEAR_GRAYSCALE)?; // 0xB9
 
-        self.write_command(CMD_PHASE_PERIOD)?;       // 0xB1
+        self.write_command(CMD_PHASE_PERIOD)?; // 0xB1
         self.write_data(&[0x22])?;
 
-        self.write_command(CMD_CLOCK_DIVIDER)?;      // 0xB3
+        self.write_command(CMD_CLOCK_DIVIDER)?; // 0xB3
         self.write_data(&[0x40])?;
 
         self.write_command(CMD_SECOND_PRECHARGE_PERIOD)?; // 0xB4
         self.write_data(&[0x07])?;
 
-        self.write_command(CMD_PRECHARGE_LEVEL)?;    // 0xBB
+        self.write_command(CMD_PRECHARGE_LEVEL)?; // 0xBB
         self.write_data(&[0x08])?;
 
-        self.write_command(CMD_VCOMH)?;              // 0xBE
+        self.write_command(CMD_VCOMH)?; // 0xBE
         self.write_data(&[0x2F])?;
 
-        self.write_command(CMD_SLEEP_MODE_OFF)       // 0xAF — Display ON
+        self.write_command(CMD_SLEEP_MODE_OFF) // 0xAF — Display ON
     }
 
     pub fn ssd1353_set_window(
@@ -603,7 +603,8 @@ where
                 // TODO: The actual ceiling could be derived from tissue loading here; stop depth is
                 //  the available proxy for now.
                 deco_len = format_depth_text(first_stop.depth(), &mut deco_label);
-                stop_time_len = format_minutes_text::<3>(first_stop.duration(), &mut stop_time_label);
+                stop_time_len =
+                    format_minutes_text::<3>(first_stop.duration(), &mut stop_time_label);
                 tts_len = format_minutes_text::<3>(
                     stop_schedule.get_deco_tts(&ascent_rate_per_meter),
                     &mut tts_label,

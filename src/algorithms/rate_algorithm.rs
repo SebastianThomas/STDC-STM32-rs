@@ -180,7 +180,9 @@ impl Default for DecoUpdateRateAlgorithm {
 #[cfg(feature = "fixed_rate_algorithms")]
 impl Default for DecoUpdateRateAlgorithm {
     fn default() -> Self {
-        DecoUpdateRateAlgorithm(FixedRateAlgorithm::new(DIVE_DECO_UPDATE_MIN_INTERVAL_MILLIS))
+        DecoUpdateRateAlgorithm(FixedRateAlgorithm::new(
+            DIVE_DECO_UPDATE_MIN_INTERVAL_MILLIS,
+        ))
     }
 }
 
@@ -229,7 +231,9 @@ impl Default for O2ToxUpdateRateAlgorithm {
 #[cfg(feature = "fixed_rate_algorithms")]
 impl Default for O2ToxUpdateRateAlgorithm {
     fn default() -> Self {
-        O2ToxUpdateRateAlgorithm(FixedRateAlgorithm::new(DIVE_O2TOX_UPDATE_MIN_INTERVAL_MILLIS))
+        O2ToxUpdateRateAlgorithm(FixedRateAlgorithm::new(
+            DIVE_O2TOX_UPDATE_MIN_INTERVAL_MILLIS,
+        ))
     }
 }
 

@@ -515,9 +515,8 @@ impl<I, P> LiveSimEmulationControl for LiveSimMS5849<I, P> {
         {
             use crate::algorithms::profile_emulation::EmulatedDiveProfile;
 
-            self.emulated_profile = EmulatedDiveProfile::mid_50m_with_deco_defaults(
-                LIVE_SIM_SAMPLE_INTERVAL_MS,
-            );
+            self.emulated_profile =
+                EmulatedDiveProfile::mid_50m_with_deco_defaults(LIVE_SIM_SAMPLE_INTERVAL_MS);
         }
         #[cfg(feature = "live_sim_20m")]
         {

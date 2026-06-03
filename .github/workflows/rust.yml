@@ -16,6 +16,9 @@ jobs:
     - uses: actions/checkout@v4
     - name: Setup target
       run: rustup target add thumbv7em-none-eabihf
+    - name: Install `just`
+      run: cargo install just
+
     - name: Build
       run: cargo build --verbose
     

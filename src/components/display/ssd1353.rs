@@ -8,6 +8,7 @@ use stm32l4xx_hal::{
 };
 
 use core::time::Duration;
+use cortex_m;
 
 use crate::components::{
     display::{DisplayState, LedDisplay, spi::SpiDisplay},
@@ -20,21 +21,23 @@ pub const SSD1353_HEIGHT: u8 = 128;
 const CMD_SET_COLUMN_ADDRESS: u8 = 0x15;
 const CMD_SET_ROW_ADDRESS: u8 = 0x75;
 const CMD_WRITE_RAM: u8 = 0x5C;
+const CMD_CONTRAST_A: u8 = 0x81;
+const CMD_CONTRAST_B: u8 = 0x82;
+const CMD_CONTRAST_C: u8 = 0x83;
+const CMD_MASTER_CONTRAST: u8 = 0x87;
 const CMD_SET_REMAP: u8 = 0xA0;
 const CMD_SET_DISPLAY_START_LINE: u8 = 0xA1;
 const CMD_SET_DISPLAY_OFFSET: u8 = 0xA2;
-const CMD_SET_NORMAL_DISPLAY: u8 = 0xA6;
-const CMD_FUNCTION_SELECTION: u8 = 0xAB;
-const CMD_SLEEP_MODE_OFF: u8 = 0xAF;
+const CMD_SET_NORMAL_DISPLAY: u8 = 0xA4;
+const CMD_SET_MUX_RATIO: u8 = 0xA8;
 const CMD_SLEEP_MODE_ON: u8 = 0xAE;
+const CMD_SLEEP_MODE_OFF: u8 = 0xAF;
+const CMD_PHASE_PERIOD: u8 = 0xB1;
 const CMD_CLOCK_DIVIDER: u8 = 0xB3;
-const CMD_PRECHARGE_A: u8 = 0x8A;
-const CMD_PRECHARGE_B: u8 = 0x8B;
-const CMD_PRECHARGE_C: u8 = 0x8C;
+const CMD_SECOND_PRECHARGE_PERIOD: u8 = 0xB4;
+const CMD_LINEAR_GRAYSCALE: u8 = 0xB9;
 const CMD_PRECHARGE_LEVEL: u8 = 0xBB;
 const CMD_VCOMH: u8 = 0xBE;
-const CMD_CONTRAST_ABC: u8 = 0xC1;
-const CMD_MASTER_CONTRAST: u8 = 0xC7;
 
 const COLOR_BLACK: u16 = 0x0000;
 const COLOR_TITLE: u16 = 0x07FF;
@@ -231,44 +234,58 @@ where
     Spi<SPI, PINS>: Write<u8>,
 {
     pub fn ssd1353_init(&mut self) -> Result<(), SpiError> {
-        self.write_command(CMD_SLEEP_MODE_ON)?;
+        // Power-on reset: RES# low ≥100µs, then high, then wait ≥100µs before commands.
+        // ~200µs at 16 MHz ≈ 3200 cycles per pulse.
+        self.reset_with_delay(|| {
+            for _ in 0..3200u32 {
+                cortex_m::asm::nop();
+            }
+        })?;
 
-        self.write_command(CMD_CLOCK_DIVIDER)?;
-        self.write_data(&[0xF1])?;
+        self.write_command(CMD_SLEEP_MODE_ON)?;      // 0xAE — Display OFF
 
-        self.write_command(CMD_SET_REMAP)?;
-        self.write_data(&[0x74])?;
+        self.write_command(CMD_SET_MUX_RATIO)?;      // 0xA8
+        self.write_data(&[0x7F])?;                  // 128 lines
 
-        self.write_command(CMD_SET_DISPLAY_START_LINE)?;
+        self.write_command(CMD_SET_DISPLAY_OFFSET)?; // 0xA2
         self.write_data(&[0x00])?;
 
-        self.write_command(CMD_SET_DISPLAY_OFFSET)?;
+        self.write_command(CMD_SET_DISPLAY_START_LINE)?; // 0xA1
         self.write_data(&[0x00])?;
 
-        self.write_command(CMD_FUNCTION_SELECTION)?;
-        self.write_data(&[0x01])?;
+        self.write_command(CMD_SET_NORMAL_DISPLAY)?; // 0xA4 — pixels follow GDDRAM
 
-        self.write_command(CMD_PRECHARGE_A)?;
-        self.write_data(&[0x64])?;
-        self.write_command(CMD_PRECHARGE_B)?;
-        self.write_data(&[0x78])?;
-        self.write_command(CMD_PRECHARGE_C)?;
-        self.write_data(&[0x64])?;
+        self.write_command(CMD_SET_REMAP)?;          // 0xA0
+        self.write_data(&[0x64])?;                  // 65K color, horiz increment, RGB
 
-        self.write_command(CMD_PRECHARGE_LEVEL)?;
-        self.write_data(&[0x3A])?;
+        self.write_command(CMD_CONTRAST_A)?;         // 0x81 — Red
+        self.write_data(&[0x75])?;
+        self.write_command(CMD_CONTRAST_B)?;         // 0x82 — Green
+        self.write_data(&[0x60])?;
+        self.write_command(CMD_CONTRAST_C)?;         // 0x83 — Blue
+        self.write_data(&[0x6A])?;
 
-        self.write_command(CMD_VCOMH)?;
-        self.write_data(&[0x3E])?;
-
-        self.write_command(CMD_CONTRAST_ABC)?;
-        self.write_data(&[0x9F, 0x8F, 0x8F])?;
-
-        self.write_command(CMD_MASTER_CONTRAST)?;
+        self.write_command(CMD_MASTER_CONTRAST)?;    // 0x87
         self.write_data(&[0x0F])?;
 
-        self.write_command(CMD_SET_NORMAL_DISPLAY)?;
-        self.write_command(CMD_SLEEP_MODE_OFF)
+        self.write_command(CMD_LINEAR_GRAYSCALE)?;   // 0xB9
+
+        self.write_command(CMD_PHASE_PERIOD)?;       // 0xB1
+        self.write_data(&[0x22])?;
+
+        self.write_command(CMD_CLOCK_DIVIDER)?;      // 0xB3
+        self.write_data(&[0x40])?;
+
+        self.write_command(CMD_SECOND_PRECHARGE_PERIOD)?; // 0xB4
+        self.write_data(&[0x07])?;
+
+        self.write_command(CMD_PRECHARGE_LEVEL)?;    // 0xBB
+        self.write_data(&[0x08])?;
+
+        self.write_command(CMD_VCOMH)?;              // 0xBE
+        self.write_data(&[0x2F])?;
+
+        self.write_command(CMD_SLEEP_MODE_OFF)       // 0xAF — Display ON
     }
 
     pub fn ssd1353_set_window(

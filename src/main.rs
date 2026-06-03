@@ -327,7 +327,7 @@ mod app {
             &mut gpioa.otyper,
             &mut gpioa.afrl,
         );
-        cs.set_high();
+        cs.set_low();
         let display_spi = Spi::spi1(
             dp.SPI1,
             (sck, miso_nc, mosi),

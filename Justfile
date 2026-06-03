@@ -1,12 +1,13 @@
 set shell := ["zsh", "-eu", "-o", "pipefail", "-c"]
 
 features := env_var_or_default('JUST_EMBED_FEATURES', '')
+host_target := env_var_or_default('JUST_HOST_TARGET', 'x86_64-apple-darwin')
 
 default:
 	just --list
 
 c:
-	cargo check --target x86_64-apple-darwin --lib --tests
+	cargo check --target {{host_target}} --lib --tests
 	cargo check --target thumbv7em-none-eabihf --bin stdc_stm32_rs --lib
 
 b:
@@ -16,22 +17,22 @@ b-bench:
 	cargo build --features online_benchmarking --target thumbv7em-none-eabihf --bin stdc_stm32_rs --lib
 
 t:
-	cargo test --target x86_64-apple-darwin --lib --tests
+	cargo test --target {{host_target}} --lib --tests
 
 test-bench:
-	cargo test --target x86_64-apple-darwin --lib --tests benchmark_tests -- --nocapture
+	cargo test --target {{host_target}} --lib --tests benchmark_tests -- --nocapture
 
 bench:
 	just sim-all
 
 sim-small:
-	cargo test --target x86_64-apple-darwin --lib benchmark_tests::benchmark_small_profile -- --nocapture
+	cargo test --target {{host_target}} --lib benchmark_tests::benchmark_small_profile -- --nocapture
 
 sim-large:
-	cargo test --target x86_64-apple-darwin --lib benchmark_tests::benchmark_large_profile -- --nocapture
+	cargo test --target {{host_target}} --lib benchmark_tests::benchmark_large_profile -- --nocapture
 
 sim-deep:
-	cargo test --target x86_64-apple-darwin --lib benchmark_tests::benchmark_deep_profile -- --nocapture
+	cargo test --target {{host_target}} --lib benchmark_tests::benchmark_deep_profile -- --nocapture
 
 sim-all:
 	just sim-small

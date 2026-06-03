@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
 For each flash-logged dive point, interpolates the captured dive profile at that
-timestamp and writes the signed depth difference (flash_depth - profile_depth).
+timestamp and writes the signed pressure difference (flash_pa - profile_pa).
+
+Comparison is performed in Pa (raw sensor pressure) to avoid freshwater/saltwater
+density assumptions.  The diff is then expressed in metres using freshwater density
+(ρ = 1000 kg/m³, g = 9.81 m/s²) for human-readable output.
 
 Inputs  (from a .tables/ directory produced by extract_bench_tables.py):
-  profile.csv            — high-rate depth samples from the RTT PROFILE lines
+  profile.csv            — high-rate depth+pressure samples from the RTT PROFILE lines
   flash_log_profile.csv  — one row per flash-written log point
 
 Outputs:
@@ -22,16 +26,49 @@ import statistics
 import sys
 from pathlib import Path
 
+FRESHWATER_PA_PER_M = 9810.0  # ρ=1000 kg/m³, g=9.81 m/s²
 
-def _read_profile(path: Path) -> list[tuple[float, float]]:
+
+def _read_profile_pa(path: Path) -> list[tuple[float, float]]:
+    """Return (time_ms, pa) pairs sorted by time.
+
+    Falls back to reconstructing Pa from depth_m for legacy CSVs that lack the pa column
+    (profile.csv pre-dates the pa column: depth_m is in msw, 1 msw = 10130 Pa gauge).
+    """
     records: list[tuple[float, float]] = []
     with path.open(newline="") as f:
         for row in csv.DictReader(line for line in f if not line.startswith("#")):
             try:
-                records.append((float(row["time_ms"]), float(row["depth_m"])))
+                t = float(row["time_ms"])
+                if "pa" in row and row["pa"]:
+                    pa = float(row["pa"])
+                else:
+                    pa = 100000.0 + float(row["depth_m"]) * 10130.0
+                records.append((t, pa))
             except (KeyError, ValueError):
                 continue
     records.sort(key=lambda x: x[0])
+    return records
+
+
+def _read_flash_pa(path: Path) -> list[tuple[int, float, int]]:
+    """Return (time_ms, pa, gas_idx) tuples.
+
+    Falls back to reconstructing Pa from depth_m for legacy CSVs
+    (flash_log_profile.csv pre-dates the pa column: depth_m = (pa-101325)/10057.7).
+    """
+    records: list[tuple[int, float, int]] = []
+    with path.open(newline="") as f:
+        for row in csv.DictReader(line for line in f if not line.startswith("#")):
+            try:
+                t = int(row["time_ms"])
+                if "pa" in row and row["pa"]:
+                    pa = float(row["pa"])
+                else:
+                    pa = 101325.0 + float(row["depth_m"]) * 10057.7
+                records.append((t, pa, int(row["gas_idx"])))
+            except (KeyError, ValueError):
+                continue
     return records
 
 
@@ -48,41 +85,37 @@ def _interpolate(profile: list[tuple[float, float]], t: float) -> float:
             lo = mid
         else:
             hi = mid
-    t0, d0 = profile[lo]
-    t1, d1 = profile[hi]
-    return d0 + (d1 - d0) * (t - t0) / (t1 - t0)
+    t0, v0 = profile[lo]
+    t1, v1 = profile[hi]
+    return v0 + (v1 - v0) * (t - t0) / (t1 - t0)
 
 
 def generate(tables_dir: Path) -> tuple[Path, Path]:
-    """Compute diffs and write both output CSVs. Returns (diff_path, summary_path)."""
-    profile = _read_profile(tables_dir / "profile.csv")
+    """Compute Pa-based diffs and write both output CSVs. Returns (diff_path, summary_path)."""
+    profile = _read_profile_pa(tables_dir / "profile.csv")
+    flash_rows = _read_flash_pa(tables_dir / "flash_log_profile.csv")
 
-    flash_rows: list[tuple[int, float, int]] = []
-    with (tables_dir / "flash_log_profile.csv").open(newline="") as f:
-        for row in csv.DictReader(line for line in f if not line.startswith("#")):
-            try:
-                flash_rows.append((
-                    int(row["time_ms"]),
-                    float(row["depth_m"]),
-                    int(row["gas_idx"]),
-                ))
-            except (KeyError, ValueError):
-                continue
-
-    diffs: list[float] = []
+    diffs_m: list[float] = []
     diff_path = tables_dir / "flash_profile_diff.csv"
     with diff_path.open("w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["time_ms", "depth_flash_m", "depth_profile_m", "depth_diff_m", "gas_idx"])
-        for time_ms, flash_depth, gas_idx in flash_rows:
-            profile_depth = _interpolate(profile, float(time_ms))
-            diff = flash_depth - profile_depth
-            diffs.append(diff)
+        writer.writerow([
+            "time_ms", "pa_flash", "pa_profile", "pa_diff",
+            "depth_flash_m", "depth_profile_m", "depth_diff_m", "gas_idx",
+        ])
+        for time_ms, flash_pa, gas_idx in flash_rows:
+            profile_pa = _interpolate(profile, float(time_ms))
+            diff_pa = flash_pa - profile_pa
+            diff_m = diff_pa / FRESHWATER_PA_PER_M
+            diffs_m.append(diff_m)
             writer.writerow([
                 time_ms,
-                f"{flash_depth:.3f}",
-                f"{profile_depth:.3f}",
-                f"{diff:.3f}",
+                f"{flash_pa:.1f}",
+                f"{profile_pa:.1f}",
+                f"{diff_pa:.1f}",
+                f"{max(0.0, (flash_pa - 101325.0) / FRESHWATER_PA_PER_M):.3f}",
+                f"{max(0.0, (profile_pa - 101325.0) / FRESHWATER_PA_PER_M):.3f}",
+                f"{diff_m:.3f}",
                 gas_idx,
             ])
 
@@ -90,13 +123,13 @@ def generate(tables_dir: Path) -> tuple[Path, Path]:
     with summary_path.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["count", "min_diff_m", "max_diff_m", "avg_diff_m", "median_diff_m"])
-        if diffs:
+        if diffs_m:
             writer.writerow([
-                len(diffs),
-                f"{min(diffs):.3f}",
-                f"{max(diffs):.3f}",
-                f"{sum(diffs) / len(diffs):.3f}",
-                f"{statistics.median(diffs):.3f}",
+                len(diffs_m),
+                f"{min(diffs_m):.3f}",
+                f"{max(diffs_m):.3f}",
+                f"{sum(diffs_m) / len(diffs_m):.3f}",
+                f"{statistics.median(diffs_m):.3f}",
             ])
         else:
             writer.writerow([0, "", "", "", ""])

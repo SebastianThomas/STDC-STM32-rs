@@ -279,45 +279,52 @@ def write_profile_csv(path: Path, log_text: str) -> None:
         except Exception:
             pass
 
-    records: list[tuple[int, float]] = []
+    records: list[tuple[int, float, float]] = []  # (time_ms, depth_m, pa)
     used_times: set[int] = set()
 
     # The live RTT stream can interleave partial writes, which occasionally tears a PROFILE line
     # and drops digits from the depth value. Scan the stream in order and prefer the preceding
     # handling-depth value when it is available.
     pending_handling_depth: float | None = None
+    pending_handling_pa: float | None = None
 
     for match in PROFILE_OR_HANDLING_RE.finditer(log_text):
         if match.group(1) is not None:
             try:
+                pending_handling_pa = float(match.group(1))
                 pending_handling_depth = float(match.group(2))
             except Exception:
+                pending_handling_pa = None
                 pending_handling_depth = None
             continue
 
         try:
             time_ms = int(match.group(3))
+            profile_pa = float(match.group(4))
             profile_depth = float(match.group(5))
         except Exception:
             pending_handling_depth = None
+            pending_handling_pa = None
             continue
 
         depth_m = pending_handling_depth if pending_handling_depth is not None else profile_depth
+        pa = pending_handling_pa if pending_handling_pa is not None else profile_pa
         pending_handling_depth = None
+        pending_handling_pa = None
 
         if not (0.0 <= depth_m <= 200.0):
             continue
         if time_ms not in used_times:
-            records.append((time_ms, depth_m))
+            records.append((time_ms, depth_m, pa))
             used_times.add(time_ms)
 
     if records:
         records.sort(key=lambda x: x[0])
         with path.open("w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["time_ms", "depth_m"])
-            for t, d in records:
-                writer.writerow([t, f"{d:.3f}"])
+            writer.writerow(["time_ms", "depth_m", "pa"])
+            for t, d, p in records:
+                writer.writerow([t, f"{d:.3f}", f"{p:.1f}"])
         return
 
     for match in DEPTH_MEASUREMENT_RE.finditer(log_text):
@@ -336,7 +343,7 @@ def write_profile_csv(path: Path, log_text: str) -> None:
         if not (0.0 <= msw_val <= 200.0):
             continue
         if time_ms not in used_times:
-            records.append((time_ms, msw_val))
+            records.append((time_ms, msw_val, surface_pa + msw_val * 10130.0))
             used_times.add(time_ms)
 
     # 2) Find time_ms anchors and look ahead for msw/Pa within a window.
@@ -356,7 +363,7 @@ def write_profile_csv(path: Path, log_text: str) -> None:
             try:
                 depth_m = float(dm.group(1))
                 if 0.0 <= depth_m <= 200.0:
-                    records.append((time_ms, depth_m))
+                    records.append((time_ms, depth_m, surface_pa + depth_m * 10130.0))
                 used_times.add(time_ms)
                 continue
             except Exception:
@@ -366,7 +373,7 @@ def write_profile_csv(path: Path, log_text: str) -> None:
                 pa = float(dp.group(1))
                 depth_m = max(0.0, (pa - surface_pa) / 10057.7)
                 if 0.0 <= depth_m <= 200.0:
-                    records.append((time_ms, depth_m))
+                    records.append((time_ms, depth_m, pa))
                 used_times.add(time_ms)
                 continue
             except Exception:
@@ -390,7 +397,7 @@ def write_profile_csv(path: Path, log_text: str) -> None:
         if not (0.0 <= depth_m <= 200.0):
             continue
         if time_ms not in used_times:
-            records.append((time_ms, depth_m))
+            records.append((time_ms, depth_m, pa))
             used_times.add(time_ms)
 
     # Sort records by time
@@ -399,9 +406,9 @@ def write_profile_csv(path: Path, log_text: str) -> None:
     # Write CSV
     with path.open("w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["time_ms", "depth_m"])
-        for t, d in records:
-            writer.writerow([t, f"{d:.3f}"])
+        writer.writerow(["time_ms", "depth_m", "pa"])
+        for t, d, p in records:
+            writer.writerow([t, f"{d:.3f}", f"{p:.1f}"])
 
 
 def write_flash_log_profile_csv(path: Path, log_text: str) -> None:
@@ -413,7 +420,7 @@ def write_flash_log_profile_csv(path: Path, log_text: str) -> None:
         except Exception:
             pass
 
-    records: list[tuple[int, float, int]] = []
+    records: list[tuple[int, float, int, float]] = []  # (time_ms, depth_m, gas_idx, pa)
     used_times: set[int] = set()
 
     for match in FLASH_LOG_RE.finditer(log_text):
@@ -427,16 +434,16 @@ def write_flash_log_profile_csv(path: Path, log_text: str) -> None:
         if not (0.0 <= depth_m <= 200.0):
             continue
         if time_ms not in used_times:
-            records.append((time_ms, depth_m, gas_idx))
+            records.append((time_ms, depth_m, gas_idx, pa))
             used_times.add(time_ms)
 
     records.sort(key=lambda x: x[0])
 
     with path.open("w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["time_ms", "depth_m", "gas_idx"])
-        for t, d, g in records:
-            writer.writerow([t, f"{d:.3f}", g])
+        writer.writerow(["time_ms", "depth_m", "gas_idx", "pa"])
+        for t, d, g, p in records:
+            writer.writerow([t, f"{d:.3f}", g, f"{p:.1f}"])
 
 
 def derive_profile_tag(sessions: list[str]) -> str | None:

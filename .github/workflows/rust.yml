@@ -17,7 +17,7 @@ jobs:
     - name: Setup target
       run: rustup target add thumbv7em-none-eabihf
     - name: Install `just`
-      run: cargo install just
+      run: apt install just
 
     - name: Build
       run: cargo build --verbose

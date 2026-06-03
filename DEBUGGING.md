@@ -14,6 +14,10 @@ For the common workflows, use `just`:
 - `just embed` for flashing and RTT/GDB setup
 - `just embed-bench` for flashing with online benchmarking enabled
 
+To run the dive simulations, use
+
+- `just embed-live-sim-log-{DEPTH}(-FEATURE)`
+
 ## 1) Start probe-rs session
 
 ```bash

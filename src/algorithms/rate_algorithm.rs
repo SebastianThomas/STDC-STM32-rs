@@ -377,6 +377,13 @@ impl AimdRateAlgorithm {
     }
 }
 
+impl RateAlgorithm<(), bool, u32> for AimdRateAlgorithm {
+    type Error = ();
+    fn next_iter(&mut self, _: (), instance: bool) -> Result<u32, Self::Error> {
+        self.next_iter(instance)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import bisect
 import csv
 import re
 import statistics
@@ -12,8 +11,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+CLOCK_HZ = 16_000_000  # STM32L476 at 16 MHz — used to convert DWT cycles to ms
+
 SAMPLE_RE = re.compile(r"bench_sample,label=([^,\s]+),cycles=(\d+),nanos=(\d+)")
-DECISION_RE = re.compile(r"(?m)^bench_decision,label=([^,\s]+),due=(true|false)(?:,skipped_ms=(\d+))?")
+# bench_decision format: bench_decision,t=<DWT_cycles>,label=<label>,due=<true|false>[,skipped_ms=<n>]
+# t= is the DWT cycle count captured at emission time; changes every event so the VT100
+# differential renderer re-emits more of the line, and it serves as the exact dedup key.
+DECISION_RE = re.compile(
+    r"(?m)^bench_decision,t=(\d+),label=([^,\s]+),due=(true|false)(?:,skipped_ms=(\d+))?"
+)
 SESSION_RE = re.compile(r"bench_session,name=([^,\s]+)")
 SCHEMA_RE = re.compile(r"bench_schema,name=([^,\s]+)")
 # Various debug prints include time and depth in slightly different formats. Cover common cases:
@@ -29,10 +35,11 @@ DEPTH_PA_RE = re.compile(r"depth\s*[:=]\s*Pa\(([-+]?[0-9]*\.?[0-9]+)\)")
 DEPTH_M_RE = re.compile(r"(?:at|depth=)\s*([-+]?[0-9]*\.?[0-9]+)\s*m")
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\a]*(?:\a|\x1b\\)|\x1b[@-_]")
 DIVE_PRESSURE_RE = re.compile(r"Dive mode pressure:\s*Pa\(([-+]?[0-9]*\.?[0-9]+)\)")
-PROFILE_RE = re.compile(r"PROFILE\s+time_ms=(\d+)\s+pa=([-+]?[0-9]*\.?[0-9]+)\s+msw=([-+]?[0-9]*\.?[0-9]+)")
+PROFILE_RE = re.compile(r"PROFILE,time_ms=(\d+),pa=([-+]?[0-9]*\.?[0-9]+),msw=([-+]?[0-9]*\.?[0-9]+)")
+FLASH_LOG_RE = re.compile(r"FLASHLOG,time_ms=(\d+),pa=([-+]?[0-9]*\.?[0-9]+),gas=(\d+)")
 PROFILE_OR_HANDLING_RE = re.compile(
     r"Handling depth measurement\s+Pa\(([-+]?[0-9]*\.?[0-9]+)\)\s+at\s+msw\(([-+]?[0-9]*\.?[0-9]+)\)"
-    r"|PROFILE\s+time_ms=(\d+)\s+pa=([-+]?[0-9]*\.?[0-9]+)\s+msw=([-+]?[0-9]*\.?[0-9]+)"
+    r"|PROFILE,time_ms=(\d+),pa=([-+]?[0-9]*\.?[0-9]+),msw=([-+]?[0-9]*\.?[0-9]+)"
 )
 
 VALID_SAMPLE_LABELS = {
@@ -70,7 +77,7 @@ class Decision:
     label: str
     due: bool
     skipped_ms: int
-    time_ms: int = 0  # wall-clock anchor from nearest preceding time_ms token (0 = unknown)
+    time_ms: int = 0  # DWT cycles converted to ms; wraps at ~268 s but consecutive events are close
 
 
 def median_int(values: list[int]) -> int:
@@ -108,7 +115,9 @@ def summarize_decisions(decisions: list[Decision]) -> dict[str, float | int]:
     not_due = [decision for decision in decisions if not decision.due]
 
     # --- wall-clock seconds: derived from intervals between consecutive due=true events ---
-    # Sort due events by their time_ms anchor, ignoring records with no anchor (time_ms==0).
+    # time_ms is DWT cycles converted to ms (wraps at ~268 s).  Sort by time_ms and
+    # filter out zero, negative, or unreasonably large gaps that arise from DWT wrap-around.
+    _MAX_INTERVAL_MS = 600_000  # 10 min upper bound; wraps produce gaps >> this
     due_with_time = sorted(
         [d for d in due if d.time_ms > 0],
         key=lambda d: d.time_ms,
@@ -118,7 +127,7 @@ def summarize_decisions(decisions: list[Decision]) -> dict[str, float | int]:
     intervals_ms = [
         due_times_ms[i] - due_times_ms[i - 1]
         for i in range(1, len(due_times_ms))
-        if due_times_ms[i] - due_times_ms[i - 1] > 0  # skip zero/negative (clock artefacts)
+        if 0 < due_times_ms[i] - due_times_ms[i - 1] < _MAX_INTERVAL_MS
     ]
     intervals_s = [v / 1000.0 for v in intervals_ms]
 
@@ -148,46 +157,43 @@ def extract_records(log_text: str) -> tuple[list[Sample], list[Decision], list[s
     decisions: list[Decision] = []
     sessions: list[str] = []
     schemas: list[str] = []
-    # Ensure concatenated bench tokens are split onto their own lines so partial writes
-    # don't produce torn numeric fields (e.g. "skipped_ms=12345bench_sample,...").
-    log_text = re.sub(r"(bench_sample,label=|bench_decision,label=|bench_session,name=|bench_schema,name=)", r"\n\1", log_text)
+    # Split concatenated bench tokens onto their own lines so partial VT100 re-renders
+    # don't produce torn numeric fields or false non-matches.
+    log_text = re.sub(
+        r"(bench_sample,label="
+        r"|bench_decision,t="
+        r"|bench_session,name="
+        r"|bench_schema,name="
+        r"|FLASHLOG,"
+        r"|PROFILE,)",
+        r"\n\1",
+        log_text,
+    )
 
     for match in SAMPLE_RE.finditer(log_text):
         label = match.group(1)
         if label in VALID_SAMPLE_LABELS:
             samples.append(Sample(label, int(match.group(2)), int(match.group(3))))
-    # Build a global map of (log_position, time_ms) for all time_ms tokens in the
-    # preprocessed text.  RTT corruption can land PROFILE lines *after* the
-    # bench_decision they belong to, so a backward-only window misses them.
-    # Using nearest-by-position (in either direction) anchors almost every decision.
-    _time_map: list[tuple[int, int]] = [
-        (m.start(), int(m.group(1))) for m in TIME_MS_RE.finditer(log_text)
-    ]
-    _tm_positions: list[int] = [t[0] for t in _time_map]
 
-    def _nearest_time_anchor(pos: int) -> int:
-        if not _time_map:
-            return 0
-        i = bisect.bisect_left(_tm_positions, pos)
-        candidates: list[tuple[int, int]] = []
-        if i > 0:
-            candidates.append(_time_map[i - 1])
-        if i < len(_time_map):
-            candidates.append(_time_map[i])
-        return min(candidates, key=lambda t: abs(t[0] - pos))[1]
-
+    # Each bench_decision now carries t=<DWT_cycles> as its first field.
+    # DWT cycles are unique per real event and change every tick, so:
+    #   - The VT100 differential renderer re-emits the line from the t= column onward.
+    #   - Deduplication by exact (label, due, t_raw) collapses TUI re-renders of the
+    #     same event to one record without relying on sparse PROFILE time anchors.
+    # Convert DWT cycles to ms for interval arithmetic (wraps at ~268 s; consecutive
+    # events are always well within that window).
+    _seen_decisions: set[tuple[str, bool, int]] = set()
     for match in DECISION_RE.finditer(log_text):
-        label = match.group(1)
+        t_raw = int(match.group(1))
+        label = match.group(2)
         if label in VALID_DECISION_LABELS:
-            time_anchor = _nearest_time_anchor(match.start())
-            decisions.append(
-                Decision(
-                    label,
-                    match.group(2) == "true",
-                    int(match.group(3) or 0),
-                    time_anchor,
-                )
-            )
+            due = match.group(3) == "true"
+            key = (label, due, t_raw)
+            if key in _seen_decisions:
+                continue
+            _seen_decisions.add(key)
+            t_ms = (t_raw * 1000) // CLOCK_HZ
+            decisions.append(Decision(label, due, int(match.group(4) or 0), t_ms))
     for match in SESSION_RE.finditer(log_text):
         sessions.append(match.group(1))
     for match in SCHEMA_RE.finditer(log_text):
@@ -398,6 +404,41 @@ def write_profile_csv(path: Path, log_text: str) -> None:
             writer.writerow([t, f"{d:.3f}"])
 
 
+def write_flash_log_profile_csv(path: Path, log_text: str) -> None:
+    surface_pa = 101325.0
+    m = re.search(r"Start Pressure:\s*([0-9]+\.?[0-9]*)\s*Pa", log_text)
+    if m:
+        try:
+            surface_pa = float(m.group(1))
+        except Exception:
+            pass
+
+    records: list[tuple[int, float, int]] = []
+    used_times: set[int] = set()
+
+    for match in FLASH_LOG_RE.finditer(log_text):
+        try:
+            time_ms = int(match.group(1))
+            pa = float(match.group(2))
+            gas_idx = int(match.group(3))
+        except Exception:
+            continue
+        depth_m = max(0.0, (pa - surface_pa) / 10057.7)
+        if not (0.0 <= depth_m <= 200.0):
+            continue
+        if time_ms not in used_times:
+            records.append((time_ms, depth_m, gas_idx))
+            used_times.add(time_ms)
+
+    records.sort(key=lambda x: x[0])
+
+    with path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["time_ms", "depth_m", "gas_idx"])
+        for t, d, g in records:
+            writer.writerow([t, f"{d:.3f}", g])
+
+
 def derive_profile_tag(sessions: list[str]) -> str | None:
     if not sessions:
         return None
@@ -450,12 +491,28 @@ def main() -> int:
     write_summary_csv(output_dir / "summary.csv", samples)
     write_decision_csv(output_dir / "decision.csv", decisions)
     write_profile_csv(output_dir / "profile.csv", cleaned_log)
+    write_flash_log_profile_csv(output_dir / "flash_log_profile.csv", cleaned_log)
     write_manifest(output_dir / "manifest.txt", log_path, samples, decisions, sessions, schemas)
 
     print(f"summary table: {output_dir / 'summary.csv'}")
     print(f"decision table: {output_dir / 'decision.csv'}")
     print(f"profile table: {output_dir / 'profile.csv'}")
+    print(f"flash log profile: {output_dir / 'flash_log_profile.csv'}")
     print(f"manifest: {output_dir / 'manifest.txt'}")
+
+    diff_script = Path(__file__).parent / "generate_flash_profile_diff.py"
+    if diff_script.exists():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("generate_flash_profile_diff", diff_script)
+        diff_mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        spec.loader.exec_module(diff_mod)  # type: ignore[union-attr]
+        try:
+            diff_path, summary_path = diff_mod.generate(output_dir)
+            print(f"flash profile diff:         {diff_path}")
+            print(f"flash profile diff summary: {summary_path}")
+        except Exception as exc:
+            print(f"flash profile diff: skipped ({exc})", file=sys.stderr)
+
     return 0
 
 

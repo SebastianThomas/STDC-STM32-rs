@@ -234,11 +234,13 @@ where
 
 #[cfg(all(target_os = "none", feature = "online_benchmarking"))]
 pub fn log_decision(label: &'static str, due: bool, skipped_ms: Option<u32>) {
+    let t = cortex_m::peripheral::DWT::cycle_count();
     if due {
-        rtt_target::rprintln!("bench_decision,label={},due=true", label);
+        rtt_target::rprintln!("bench_decision,t={},label={},due=true", t, label);
     } else {
         rtt_target::rprintln!(
-            "bench_decision,label={},due=false,skipped_ms={}",
+            "bench_decision,t={},label={},due=false,skipped_ms={}",
+            t,
             label,
             skipped_ms.unwrap_or(0)
         );
@@ -247,11 +249,15 @@ pub fn log_decision(label: &'static str, due: bool, skipped_ms: Option<u32>) {
 
 #[cfg(all(not(target_os = "none"), test))]
 pub fn log_decision(label: &'static str, due: bool, skipped_ms: Option<u32>) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static T: AtomicU32 = AtomicU32::new(1);
+    let t = T.fetch_add(1, Ordering::Relaxed);
     if due {
-        println!("bench_decision,label={},due=true", label);
+        println!("bench_decision,t={},label={},due=true", t, label);
     } else {
         println!(
-            "bench_decision,label={},due=false,skipped_ms={}",
+            "bench_decision,t={},label={},due=false,skipped_ms={}",
+            t,
             label,
             skipped_ms.unwrap_or(0)
         );

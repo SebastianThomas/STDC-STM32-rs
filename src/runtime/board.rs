@@ -133,10 +133,6 @@ where
             rprintln!("{:?}", e.details.as_bytes());
         }
     }
-    // TODO: Remove
-    for _ in 1..1_000_000_000 {
-        cortex_m::asm::nop();
-    }
     display
 }
 

@@ -22,3 +22,5 @@ target
 # Rust Compiler Crash Reports
 rustc-ice*.txt
 
+**/__pycache__
+

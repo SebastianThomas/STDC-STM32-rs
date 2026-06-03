@@ -220,10 +220,9 @@ where
             );
             #[cfg(not(feature = "live_sim"))]
             rprintln!("Handling depth measurement {:?} at {:?}", pressure, depth);
-            // Machine-parseable profile line for extract_bench_tables.py
             #[cfg(feature = "live_sim")]
             rprintln!(
-                "PROFILE time_ms={} pa={} msw={} ",
+                "PROFILE,time_ms={},pa={},msw={}",
                 measurement_millis,
                 pressure.to_pa().to_f32(),
                 depth.to_msw().to_f32()
@@ -324,6 +323,13 @@ pub fn write_flash_log<const NUM_GASES: usize>(
         Ok((basic_start_addr, deco_start_addr)) => {
             runtime.last_logged_millis = flash_log.measurement_millis;
             runtime.last_logged_pressure = flash_log.pressure;
+            #[cfg(feature = "live_sim")]
+            rprintln!(
+                "FLASHLOG,time_ms={},pa={},gas={}",
+                flash_log.measurement_millis,
+                flash_log.pressure.to_pa().to_f32(),
+                flash_log.measurement.gas,
+            );
 
             let next_pos = deco_start_addr
                 .map(|addr| addr + 8)

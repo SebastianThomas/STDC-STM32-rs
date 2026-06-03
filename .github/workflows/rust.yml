@@ -16,8 +16,11 @@ jobs:
     - uses: actions/checkout@v4
     - name: Setup target
       run: rustup target add thumbv7em-none-eabihf
-    - name: Install `just`
-      run: apt install zsh just
+
+    - name: Install `zsh` and `just`
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y zsh just
 
     - name: Build
       run: cargo build --verbose

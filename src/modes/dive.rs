@@ -253,6 +253,11 @@ where
             #[cfg(not(feature = "live_sim"))]
             let _ = deco_overlay;
 
+            #[cfg(feature = "live_sim")]
+            if let Some(deco_overlay) = deco_overlay {
+                ms5849_i2c.sync_live_sim_dive_overlay(deco_overlay);
+            }
+
             flash_log = flash_log_tick_plan(
                 &mut runtime.flash_log_algorithm,
                 &mut runtime.last_logged_millis,

@@ -1,0 +1,5 @@
+log_file=/Users/sebas/STDC/STDC_STM32/stdc_stm32_rs/target/rtt-live-sim-fixed-20260604-121028.log
+bench_session=dive.online_benchmarking.profile.deepbech_schema
+bench_schema=summary.csvWas
+sample_count=19119
+decision_count=13126

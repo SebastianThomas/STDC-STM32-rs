@@ -18,6 +18,14 @@ To run the dive simulations, use
 
 - `just embed-live-sim-log-{DEPTH}(-FEATURE)`
 
+After a simulation ends, the LEDs on the PCB turn off and a message is printed
+to the terminal console that the MCU will go to sleep, press Ctrl+C to close
+the VT100 terminal display and Ctrl+C again to abort the `cargo embed` run.
+Then, the python scripts will be run to clean up the output log files and
+extract csvs from the log.
+
+Alternatively, you may want to debug the default application:
+
 ## 1) Start probe-rs session
 
 ```bash
